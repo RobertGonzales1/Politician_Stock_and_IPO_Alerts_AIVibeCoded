@@ -1,6 +1,6 @@
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
 from bs4 import BeautifulSoup
 import re
@@ -10,7 +10,9 @@ class IPOTracker:
         self.seen_ipos_file = "data/seen_ipos.json"
         self.seen_ipos = self._load_seen_ipos()
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5'
         }
 
     def _load_seen_ipos(self) -> set:
@@ -27,47 +29,42 @@ class IPOTracker:
             json.dump(list(self.seen_ipos), f)
 
     def get_upcoming_ipos(self) -> List[Dict]:
-        """Scrape upcoming IPOs from SEC EDGAR and other sources"""
+        """Scrape upcoming IPOs from SEC and financial data sources"""
         ipos = []
 
         try:
-            # Method 1: SEC EDGAR - Recent S-1 filings (IPO prospectuses)
-            url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=S-1&dateb=&owner=exclude&count=100&myHID="
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
+            # Method 1: Try SEC EDGAR with JSON API (less likely to be blocked)
+            url = "https://www.sec.gov/cgi-json/browse-edgar?action=getcompany&type=S-1&dateb=&owner=exclude&count=40"
 
-            soup = BeautifulSoup(response.content, 'html.parser')
+            response = requests.get(url, headers=self.headers, timeout=15)
 
-            # Find the main results table
-            table = soup.find('table', {'class': 'tableFile'})
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    filings = data.get('filings', {}).get('filing', [])
 
-            if table:
-                rows = table.find_all('tr')[1:]  # Skip header
+                    for filing in filings[:25]:
+                        company_name = filing.get('company_name', 'Unknown')
+                        cik = filing.get('cik_str', '')
+                        date = filing.get('filing_date', str(datetime.now().date()))
 
-                for row in rows[:25]:  # Limit to first 25 results
-                    try:
-                        cols = row.find_all('td')
-                        if len(cols) >= 4:
-                            company_link = cols[0].find('a')
-                            if company_link:
-                                company = company_link.text.strip()
-                                cik = cols[1].text.strip()
-                                filing_date = cols[3].text.strip()
+                        ipo_id = f"{cik}_{company_name}_{date}"
 
-                                # Create unique ID
-                                ipo_id = f"{cik}_{filing_date}_{company}"
-
-                                if ipo_id not in self.seen_ipos and company:
-                                    ipos.append({
-                                        'company': company,
-                                        'cik': cik,
-                                        'filing_date': filing_date,
-                                        'type': 'S-1 (IPO Prospectus)',
-                                        'sec_url': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=S-1&dateb=&owner=exclude&count=100"
-                                    })
-                                    self.seen_ipos.add(ipo_id)
-                    except (IndexError, AttributeError) as e:
-                        continue
+                        if ipo_id not in self.seen_ipos and company_name:
+                            ipos.append({
+                                'company': company_name,
+                                'cik': cik,
+                                'filing_date': date,
+                                'type': 'S-1 (IPO Registration)',
+                                'sec_url': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&owner=exclude&count=100"
+                            })
+                            self.seen_ipos.add(ipo_id)
+                except json.JSONDecodeError:
+                    # If JSON fails, try HTML parsing
+                    ipos.extend(self._scrape_html_fallback())
+            else:
+                # Fallback to HTML scraping
+                ipos.extend(self._scrape_html_fallback())
 
             self._save_seen_ipos()
             return ipos
@@ -75,6 +72,48 @@ class IPOTracker:
         except requests.RequestException as e:
             print(f"Error fetching IPO data: {e}")
             return []
+
+    def _scrape_html_fallback(self) -> List[Dict]:
+        """Fallback method using HTML scraping"""
+        ipos = []
+        try:
+            # Try alternative SEC URL format
+            url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=424B4&owner=exclude&count=50"
+            response = requests.get(url, headers=self.headers, timeout=15)
+
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                table = soup.find('table', {'summary': 'Results'})
+
+                if table:
+                    rows = table.find_all('tr')[1:26]  # Skip header, get first 25
+
+                    for row in rows:
+                        cols = row.find_all('td')
+                        if len(cols) >= 4:
+                            try:
+                                company_link = cols[0].find('a')
+                                if company_link:
+                                    company = company_link.text.strip()
+                                    cik = cols[1].text.strip()
+                                    date = cols[3].text.strip()
+
+                                    ipo_id = f"{cik}_{company}_{date}"
+                                    if ipo_id not in self.seen_ipos and company:
+                                        ipos.append({
+                                            'company': company,
+                                            'cik': cik,
+                                            'filing_date': date,
+                                            'type': '424B4 (IPO Prospectus)',
+                                            'sec_url': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&owner=exclude"
+                                        })
+                                        self.seen_ipos.add(ipo_id)
+                            except (IndexError, AttributeError):
+                                continue
+        except:
+            pass
+
+        return ipos
 
     def format_ipo_alert(self, ipo: Dict) -> str:
         """Format an IPO into readable alert text"""

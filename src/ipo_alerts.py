@@ -2,6 +2,7 @@ import requests
 import json
 from datetime import datetime, timedelta
 from typing import List, Dict
+from xml.etree import ElementTree as ET
 import time
 
 class IPOTracker:
@@ -9,7 +10,9 @@ class IPOTracker:
         self.seen_ipos_file = "data/seen_ipos.json"
         self.seen_ipos = self._load_seen_ipos()
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/rss+xml,application/xml,*/*',
+            'Referer': 'https://www.sec.gov'
         }
 
     def _load_seen_ipos(self) -> set:
@@ -26,98 +29,92 @@ class IPOTracker:
             json.dump(list(self.seen_ipos), f)
 
     def get_upcoming_ipos(self) -> List[Dict]:
-        """Fetch upcoming IPOs using SEC EDGAR JSON API (free, no auth required)"""
+        """Fetch IPOs using SEC RSS feeds (designed for automated access)"""
         ipos = []
 
         try:
-            # Use SEC EDGAR JSON API to get S-1 filings (IPO registration statements)
-            # This is the official SEC API - no authentication needed
-            url = "https://www.sec.gov/cgi-json/browse-edgar"
-            params = {
-                'action': 'getcompany',
-                'type': 'S-1',
-                'count': 100,
-                'output': 'json'
-            }
+            # Use SEC RSS feeds - these are designed for automated consumption
+            # CIK = 0 with form type S-1 = all S-1 filings
 
-            response = requests.get(url, params=params, headers=self.headers, timeout=15)
-            response.raise_for_status()
+            # Try the RSS feed for S-1 filings
+            rss_urls = [
+                "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=S-1&dateb=&owner=exclude&match=&count=100&format=atom",
+                "https://www.sec.gov/feeds/form-S1",
+                "https://feeds.bloomberg.com/markets/IPO_Calendar.rss"
+            ]
 
-            data = response.json()
-            filings = data.get('filings', {}).get('filing', [])
-
-            # Process S-1 filings (IPO prospectuses)
-            for filing in filings[:40]:
+            for rss_url in rss_urls:
                 try:
-                    company_name = filing.get('company_name', '').strip()
-                    cik = filing.get('cik_str', '')
-                    filing_date = filing.get('filing_date', '')
-                    accession = filing.get('accession_number', '')
+                    response = requests.get(rss_url, headers=self.headers, timeout=15)
 
-                    if company_name and cik and filing_date:
-                        ipo_id = f"{cik}_{filing_date}_{company_name}"
+                    if response.status_code == 200:
+                        # Parse RSS/Atom feed
+                        root = ET.fromstring(response.content)
 
-                        if ipo_id not in self.seen_ipos:
-                            # Get more details if available
-                            form_type = filing.get('form_type', 'S-1').strip()
+                        # Handle both RSS and Atom formats
+                        namespaces = {
+                            'atom': 'http://www.w3.org/2005/Atom',
+                            'content': 'http://purl.org/rss/1.0/modules/content/'
+                        }
 
-                            ipos.append({
-                                'company': company_name,
-                                'cik': cik,
-                                'filing_date': filing_date,
-                                'accession': accession,
-                                'type': form_type,
-                                'sec_url': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=S-1&dateb=&owner=exclude&count=100",
-                                'filing_url': f"https://www.sec.gov/cgi-bin/viewer?action=view&cik={cik}&accession_number={accession}&xbrl_type=v"
-                            })
-                            self.seen_ipos.add(ipo_id)
+                        # Try Atom format first
+                        entries = root.findall('atom:entry', namespaces)
+                        if not entries:
+                            entries = root.findall('.//item')
 
-                except (KeyError, TypeError) as e:
+                        for entry in entries[:30]:
+                            try:
+                                # Atom format
+                                title_elem = entry.find('atom:title', namespaces)
+                                published_elem = entry.find('atom:published', namespaces)
+                                link_elem = entry.find('atom:link', namespaces)
+
+                                # RSS format fallback
+                                if title_elem is None:
+                                    title_elem = entry.find('title')
+                                if published_elem is None:
+                                    published_elem = entry.find('pubDate')
+                                if link_elem is None:
+                                    link_elem = entry.find('link')
+
+                                title = title_elem.text if title_elem is not None else ''
+                                date = published_elem.text if published_elem is not None else str(datetime.now().date())
+                                link = link_elem.text if link_elem is not None else ''
+                                if link_elem is not None and link_elem.get('href'):
+                                    link = link_elem.get('href')
+
+                                if 'S-1' in title or 'IPO' in title.upper():
+                                    # Extract company name and CIK from title
+                                    company_name = title.split('-')[0].strip() if '-' in title else title[:60]
+                                    cik = title.split('CIK=')[-1][:10] if 'CIK=' in title else ''
+
+                                    ipo_id = f"{cik}_{company_name}_{date}"
+
+                                    if ipo_id not in self.seen_ipos and company_name:
+                                        ipos.append({
+                                            'company': company_name,
+                                            'cik': cik,
+                                            'filing_date': date[:10],
+                                            'type': 'S-1 (IPO Registration)',
+                                            'sec_url': link if link else f"https://www.sec.gov/cgi-bin/browse-edgar?type=S-1"
+                                        })
+                                        self.seen_ipos.add(ipo_id)
+                            except Exception as e:
+                                continue
+
+                        if ipos:  # If we got results from this feed, return
+                            break
+
+                    time.sleep(0.5)  # Small delay between requests
+
+                except Exception as e:
+                    print(f"Error with RSS feed {rss_url}: {e}")
                     continue
 
-            # Add delay to be respectful to SEC servers
-            time.sleep(1)
-
-            # Also check for 424B5 filings (prospectus supplements - sometimes indicates IPO ready)
-            try:
-                params['type'] = '424B5'
-                response2 = requests.get(url, params=params, headers=self.headers, timeout=15)
-                response2.raise_for_status()
-
-                data2 = response2.json()
-                filings2 = data2.get('filings', {}).get('filing', [])
-
-                for filing in filings2[:20]:
-                    try:
-                        company_name = filing.get('company_name', '').strip()
-                        cik = filing.get('cik_str', '')
-                        filing_date = filing.get('filing_date', '')
-                        accession = filing.get('accession_number', '')
-
-                        if company_name and cik:
-                            ipo_id = f"{cik}_{filing_date}_{company_name}_424B5"
-
-                            if ipo_id not in self.seen_ipos:
-                                ipos.append({
-                                    'company': company_name,
-                                    'cik': cik,
-                                    'filing_date': filing_date,
-                                    'accession': accession,
-                                    'type': '424B5 (Prospectus Supplement)',
-                                    'sec_url': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&owner=exclude",
-                                    'filing_url': f"https://www.sec.gov/cgi-bin/viewer?action=view&cik={cik}&accession_number={accession}&xbrl_type=v"
-                                })
-                                self.seen_ipos.add(ipo_id)
-                    except (KeyError, TypeError):
-                        continue
-
-            except:
-                pass
-
             self._save_seen_ipos()
-            return ipos[:30]  # Return top 30 IPOs
+            return ipos[:25]
 
-        except requests.RequestException as e:
+        except Exception as e:
             print(f"Error fetching IPO data: {e}")
             return []
 
@@ -125,12 +122,12 @@ class IPOTracker:
         """Format an IPO into readable alert text"""
         company = ipo.get('company', 'Unknown')
         filing_date = ipo.get('filing_date', 'Unknown')
-        form_type = ipo.get('type', 'S-1')
+        ipo_type = ipo.get('type', 'S-1')
         sec_url = ipo.get('sec_url', '')
 
-        alert = f"🚀 NEW IPO ALERT\nCompany: {company}\nFiling Date: {filing_date}\nForm Type: {form_type}"
+        alert = f"🚀 NEW IPO ALERT\nCompany: {company}\nFiling Date: {filing_date}\nType: {ipo_type}"
         if sec_url:
-            alert += f"\nView on SEC: {sec_url}"
+            alert += f"\nLink: {sec_url}"
         alert += "\n---"
 
         return alert

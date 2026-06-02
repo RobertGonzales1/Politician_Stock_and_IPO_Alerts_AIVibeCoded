@@ -32,6 +32,8 @@ jobs:
           python main.py
 
       - name: Commit data updates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
@@ -40,5 +42,5 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "chore: update tracking data [skip ci]"
-            git push
+            git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:${{ github.ref }}
           fi

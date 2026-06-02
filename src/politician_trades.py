@@ -5,6 +5,7 @@ from typing import List, Dict
 from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
 import time
+import re
 
 class PoliticianTradeTracker:
     def __init__(self):
@@ -13,8 +14,6 @@ class PoliticianTradeTracker:
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/rss+xml,application/xml,text/html,*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.sec.gov/'
         }
 
     def _load_seen_trades(self) -> set:
@@ -31,217 +30,284 @@ class PoliticianTradeTracker:
             json.dump(list(self.seen_trades), f)
 
     def get_recent_trades(self) -> List[Dict]:
-        """Fetch politician trades from multiple sources with debugging"""
+        """Fetch politician trades from multiple RSS feed sources"""
         trades = []
 
-        # Try SEC RSS first
-        print("[DEBUG] Attempting SEC RSS feeds for Form 4 filings...")
-        sec_trades = self._fetch_sec_rss_trades()
-        print(f"[DEBUG] SEC RSS returned {len(sec_trades)} trades")
-        trades.extend(sec_trades)
+        # Try Google News RSS
+        print("[DEBUG] Attempting Google News RSS...")
+        trades.extend(self._fetch_google_news_trades())
         time.sleep(1)
 
-        # Try news sources for Congress trading news
-        print("[DEBUG] Attempting financial news sources for Congress trades...")
-        news_trades = self._fetch_news_congress_trades()
-        print(f"[DEBUG] News sources returned {len(news_trades)} trades")
-        trades.extend(news_trades)
+        # Try financial news RSS feeds
+        print("[DEBUG] Attempting financial news RSS feeds...")
+        trades.extend(self._fetch_financial_rss_trades())
         time.sleep(1)
 
-        # Try House.gov directly
-        print("[DEBUG] Attempting House.gov financial disclosures...")
-        house_trades = self._fetch_house_gov_trades()
-        print(f"[DEBUG] House.gov returned {len(house_trades)} trades")
-        trades.extend(house_trades)
+        # Try alternative SEC endpoints
+        print("[DEBUG] Attempting alternative SEC data sources...")
+        trades.extend(self._fetch_alternative_sec_trades())
+        time.sleep(1)
+
+        # Try CNBC and Bloomberg news
+        print("[DEBUG] Attempting CNBC/Bloomberg feeds...")
+        trades.extend(self._fetch_cnbc_bloomberg_trades())
 
         self._save_seen_trades()
         return trades[:20]
 
-    def _fetch_sec_rss_trades(self) -> List[Dict]:
-        """Fetch from SEC RSS feeds"""
+    def _fetch_google_news_trades(self) -> List[Dict]:
+        """Fetch from Google News RSS for Congress trading news"""
         trades = []
-        rss_urls = [
-            "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=4&dateb=&owner=exclude&match=&count=100&format=atom",
-            "https://www.sec.gov/feeds/form-4",
+
+        # Google News RSS feeds for Congress trading keywords
+        queries = [
+            'Congress stock trading',
+            'Senate stock purchases',
+            'Representative stock trading',
+            'Congressional insider trades'
         ]
 
-        for rss_url in rss_urls:
+        for query in queries:
             try:
-                print(f"[DEBUG] Fetching {rss_url}")
+                # Google News RSS endpoint
+                rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+                print(f"[DEBUG] Fetching Google News for: {query}")
+
                 response = requests.get(rss_url, headers=self.headers, timeout=15)
 
                 if response.status_code == 200:
-                    print(f"[DEBUG] Got 200 response from {rss_url}")
+                    print(f"[DEBUG] Got 200 from Google News")
                     try:
                         root = ET.fromstring(response.content)
-                        namespaces = {
-                            'atom': 'http://www.w3.org/2005/Atom',
-                            'content': 'http://purl.org/rss/1.0/modules/content/'
-                        }
+                        items = root.findall('.//item')
+                        print(f"[DEBUG] Found {len(items)} items")
 
-                        entries = root.findall('atom:entry', namespaces)
-                        if not entries:
-                            entries = root.findall('.//item')
-
-                        print(f"[DEBUG] Found {len(entries)} entries in RSS")
-
-                        for entry in entries[:40]:
+                        for item in items[:15]:
                             try:
-                                title_elem = entry.find('atom:title', namespaces)
-                                published_elem = entry.find('atom:published', namespaces)
-                                summary_elem = entry.find('atom:summary', namespaces)
-
-                                if title_elem is None:
-                                    title_elem = entry.find('title')
-                                if published_elem is None:
-                                    published_elem = entry.find('pubDate')
-                                if summary_elem is None:
-                                    summary_elem = entry.find('description')
+                                title_elem = item.find('title')
+                                pub_date_elem = item.find('pubDate')
+                                link_elem = item.find('link')
 
                                 title = title_elem.text if title_elem is not None else ''
-                                published = published_elem.text if published_elem is not None else str(datetime.now())
-                                summary = summary_elem.text if summary_elem is not None else ''
+                                pub_date = pub_date_elem.text if pub_date_elem is not None else str(datetime.now())
+                                link = link_elem.text if link_elem is not None else ''
 
-                                if 'Form 4' in title or '4' in title:
-                                    parts = title.split('-')
-                                    company_name = parts[0].strip() if parts else title[:50]
-                                    cik = parts[1].strip()[:10] if len(parts) > 1 else ''
+                                if title and any(kw in title.upper() for kw in ['TRADE', 'BUY', 'SELL', 'STOCK']):
+                                    trade_id = f"gnews_{title}_{pub_date[:10]}"
 
-                                    trade_id = f"{cik}_{company_name}_{published[:10]}"
-
-                                    if trade_id not in self.seen_trades:
+                                    if trade_id not in self.seen_trades and len(title) > 15:
                                         trades.append({
-                                            'politician_name': company_name,
-                                            'ticker': cik,
-                                            'transaction_type': 'Form 4 Filing',
-                                            'amount': 'See SEC Filing',
-                                            'transaction_date': published[:10],
+                                            'politician_name': title[:70],
+                                            'ticker': 'Congress',
+                                            'transaction_type': 'News Alert',
+                                            'amount': 'See Article',
+                                            'transaction_date': pub_date[:10],
                                             'id': trade_id,
-                                            'summary': summary[:100] if summary else ''
+                                            'source': 'Google News',
+                                            'link': link
                                         })
                                         self.seen_trades.add(trade_id)
-                                        print(f"[DEBUG] Added trade: {company_name}")
+                                        print(f"[DEBUG] Added: {title[:40]}")
 
                             except Exception as e:
                                 continue
 
-                        if trades:
-                            print(f"[DEBUG] RSS feed successful, found {len(trades)} new trades")
-                            break
-
                     except ET.ParseError as e:
-                        print(f"[DEBUG] XML Parse error: {e}")
-                        continue
+                        print(f"[DEBUG] XML parse error: {e}")
                 else:
-                    print(f"[DEBUG] Got {response.status_code} from {rss_url}")
+                    print(f"[DEBUG] Got {response.status_code} from Google News")
 
-            except requests.RequestException as e:
-                print(f"[DEBUG] Request error from {rss_url}: {e}")
-                continue
+            except Exception as e:
+                print(f"[DEBUG] Error: {e}")
+
+            time.sleep(0.5)
 
         return trades
 
-    def _fetch_news_congress_trades(self) -> List[Dict]:
-        """Fetch Congress trading news from financial sites"""
+    def _fetch_financial_rss_trades(self) -> List[Dict]:
+        """Fetch from financial news RSS feeds"""
         trades = []
 
-        news_sources = [
+        rss_feeds = [
             {
-                'name': 'Yahoo Finance Congress',
-                'url': 'https://finance.yahoo.com/news/congress-stock-trades/'
+                'name': 'CNBC Business',
+                'url': 'https://www.cnbc.com/id/100003114/device/rss/rss.html'
             },
             {
-                'name': 'MarketWatch Congress',
-                'url': 'https://www.marketwatch.com/news/congress-stock-trades'
+                'name': 'Reuters Markets',
+                'url': 'https://feeds.reuters.com/reuters/businessNews'
+            },
+            {
+                'name': 'AP Business News',
+                'url': 'https://apnews.com/apf-services/APIFeeds?formats=rss&tags=business'
+            },
+            {
+                'name': 'Financial Times',
+                'url': 'https://feeds.ft.com/markets'
             }
         ]
 
-        for source in news_sources:
+        for feed in rss_feeds:
             try:
-                print(f"[DEBUG] Fetching {source['name']} from {source['url']}")
+                print(f"[DEBUG] Fetching {feed['name']}")
+                response = requests.get(feed['url'], headers=self.headers, timeout=15)
+
+                if response.status_code == 200:
+                    print(f"[DEBUG] Got 200 from {feed['name']}")
+                    try:
+                        root = ET.fromstring(response.content)
+                        items = root.findall('.//item')
+                        print(f"[DEBUG] Found {len(items)} items from {feed['name']}")
+
+                        for item in items[:20]:
+                            try:
+                                title_elem = item.find('title')
+                                pub_date_elem = item.find('pubDate')
+                                link_elem = item.find('link')
+
+                                title = title_elem.text if title_elem is not None else ''
+                                pub_date = pub_date_elem.text if pub_date_elem is not None else str(datetime.now())
+                                link = link_elem.text if link_elem is not None else ''
+
+                                if any(kw in title.upper() for kw in ['CONGRESS', 'SENATE', 'REPRESENTATIVE', 'TRADE', 'BUY STOCK']):
+                                    trade_id = f"{feed['name']}_{title}_{pub_date[:10]}"
+
+                                    if trade_id not in self.seen_trades and len(title) > 15:
+                                        trades.append({
+                                            'politician_name': title[:70],
+                                            'ticker': 'Congress',
+                                            'transaction_type': 'Business News',
+                                            'amount': 'See Article',
+                                            'transaction_date': pub_date[:10],
+                                            'id': trade_id,
+                                            'source': feed['name'],
+                                            'link': link
+                                        })
+                                        self.seen_trades.add(trade_id)
+                                        print(f"[DEBUG] Added from {feed['name']}: {title[:40]}")
+
+                            except:
+                                continue
+
+                    except ET.ParseError as e:
+                        print(f"[DEBUG] XML parse error from {feed['name']}: {e}")
+                else:
+                    print(f"[DEBUG] Got {response.status_code} from {feed['name']}")
+
+            except Exception as e:
+                print(f"[DEBUG] Error fetching {feed['name']}: {e}")
+
+            time.sleep(0.5)
+
+        return trades
+
+    def _fetch_alternative_sec_trades(self) -> List[Dict]:
+        """Try alternative SEC endpoints that might not be blocked"""
+        trades = []
+
+        alt_urls = [
+            'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=4&dateb=&owner=exclude&count=40&CIK=',
+            'https://www.sec.gov/edgar/browse/?CIK=',
+        ]
+
+        for url in alt_urls:
+            try:
+                print(f"[DEBUG] Trying alternative SEC endpoint")
+                response = requests.get(url, headers=self.headers, timeout=10)
+
+                if response.status_code == 200:
+                    print(f"[DEBUG] Alternative SEC endpoint worked!")
+                    # If we get here, parse the response
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    tables = soup.find_all('table')
+                    print(f"[DEBUG] Found {len(tables)} tables")
+
+                    if tables:
+                        for table in tables[:2]:
+                            rows = table.find_all('tr')[1:20]
+                            for row in rows:
+                                try:
+                                    cols = row.find_all('td')
+                                    if len(cols) >= 2:
+                                        company = cols[0].text.strip()[:50]
+                                        date = cols[-1].text.strip()
+
+                                        trade_id = f"alt_sec_{company}_{date}"
+                                        if trade_id not in self.seen_trades and company:
+                                            trades.append({
+                                                'politician_name': company,
+                                                'ticker': 'SEC',
+                                                'transaction_type': 'Form 4',
+                                                'amount': 'See SEC',
+                                                'transaction_date': date,
+                                                'id': trade_id,
+                                                'source': 'SEC Alternative'
+                                            })
+                                            self.seen_trades.add(trade_id)
+                                            print(f"[DEBUG] Added: {company}")
+                                except:
+                                    continue
+                else:
+                    print(f"[DEBUG] Alt SEC got {response.status_code}")
+
+            except Exception as e:
+                print(f"[DEBUG] Alt SEC error: {e}")
+
+            time.sleep(0.5)
+
+        return trades
+
+    def _fetch_cnbc_bloomberg_trades(self) -> List[Dict]:
+        """Fetch from CNBC and Bloomberg direct URLs"""
+        trades = []
+
+        sources = [
+            {
+                'name': 'CNBC Congress Trades',
+                'url': 'https://www.cnbc.com/search/?query=congress%20stock%20trading'
+            },
+            {
+                'name': 'Bloomberg Politics',
+                'url': 'https://www.bloomberg.com/politics'
+            }
+        ]
+
+        for source in sources:
+            try:
+                print(f"[DEBUG] Fetching {source['name']}")
                 response = requests.get(source['url'], headers=self.headers, timeout=15)
 
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.content, 'html.parser')
-                    articles = soup.find_all(['a', 'h2', 'h3'])[:30]
+                    links = soup.find_all('a', href=True)
+                    print(f"[DEBUG] Found {len(links)} links from {source['name']}")
 
-                    print(f"[DEBUG] Found {len(articles)} articles from {source['name']}")
+                    for link in links[:30]:
+                        title = link.text.strip()
 
-                    for article in articles:
-                        try:
-                            title = article.text.strip()
+                        if any(kw in title.upper() for kw in ['TRADE', 'CONGRESS', 'SENATE', 'STOCK']):
+                            trade_id = f"{source['name']}_{title}_{datetime.now().date()}"
 
-                            if any(keyword in title.upper() for keyword in ['CONGRESS', 'SENATE', 'HOUSE', 'TRADE', 'BUY', 'SELL']):
-                                trade_id = f"{source['name']}_{title}_{datetime.now().date()}"
-
-                                if trade_id not in self.seen_trades and len(title) > 10:
-                                    trades.append({
-                                        'politician_name': title[:60],
-                                        'ticker': 'Congress',
-                                        'transaction_type': 'News Report',
-                                        'amount': 'See Article',
-                                        'transaction_date': str(datetime.now().date()),
-                                        'id': trade_id,
-                                        'source': source['name']
-                                    })
-                                    self.seen_trades.add(trade_id)
-                                    print(f"[DEBUG] Added news trade: {title[:40]}")
-
-                        except:
-                            continue
+                            if trade_id not in self.seen_trades and len(title) > 10:
+                                trades.append({
+                                    'politician_name': title[:70],
+                                    'ticker': 'Congress',
+                                    'transaction_type': 'Media Report',
+                                    'amount': 'See Article',
+                                    'transaction_date': str(datetime.now().date()),
+                                    'id': trade_id,
+                                    'source': source['name']
+                                })
+                                self.seen_trades.add(trade_id)
+                                print(f"[DEBUG] Added from {source['name']}: {title[:40]}")
 
                 else:
                     print(f"[DEBUG] Got {response.status_code} from {source['name']}")
 
             except Exception as e:
                 print(f"[DEBUG] Error from {source['name']}: {e}")
-                continue
 
-            time.sleep(1)
-
-        return trades
-
-    def _fetch_house_gov_trades(self) -> List[Dict]:
-        """Fetch from House.gov financial disclosures"""
-        trades = []
-
-        try:
-            url = "https://disclosures-clerk.house.gov/public_disc/"
-            print(f"[DEBUG] Fetching House.gov disclosures from {url}")
-
-            response = requests.get(url, headers=self.headers, timeout=15)
-
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                links = soup.find_all('a', href=True)[:50]
-
-                print(f"[DEBUG] Found {len(links)} links on House.gov")
-
-                for link in links:
-                    href = link.get('href', '')
-                    text = link.text.strip()
-
-                    if any(keyword in text.lower() for keyword in ['transaction', 'trade', 'stock', 'filing']):
-                        trade_id = f"house_{text}_{datetime.now().date()}"
-
-                        if trade_id not in self.seen_trades and len(text) > 5:
-                            trades.append({
-                                'politician_name': text[:50],
-                                'ticker': 'Congress',
-                                'transaction_type': 'House Disclosure',
-                                'amount': 'See Link',
-                                'transaction_date': str(datetime.now().date()),
-                                'id': trade_id,
-                                'link': url + href if not href.startswith('http') else href
-                            })
-                            self.seen_trades.add(trade_id)
-                            print(f"[DEBUG] Added House trade: {text[:40]}")
-
-            else:
-                print(f"[DEBUG] Got {response.status_code} from House.gov")
-
-        except Exception as e:
-            print(f"[DEBUG] Error fetching House.gov: {e}")
+            time.sleep(0.5)
 
         return trades
 
@@ -250,12 +316,11 @@ class PoliticianTradeTracker:
         politician = trade.get('politician_name', 'Unknown')
         filing_type = trade.get('transaction_type', 'Unknown')
         date = trade.get('transaction_date', 'Unknown')
-        summary = trade.get('summary', '')
+        source = trade.get('source', 'Financial News')
 
-        alert = f"📈 POLITICAL INSIDER TRADE\nFiler: {politician}\nType: {filing_type}\nDate: {date}"
-        if summary:
-            alert += f"\nDetails: {summary}"
-        alert += "\nView on SEC: https://www.sec.gov/cgi-bin/browse-edgar?type=4"
+        alert = f"📈 CONGRESS TRADING ALERT\nHeadline: {politician}\nType: {filing_type}\nDate: {date}\nSource: {source}"
+        if trade.get('link'):
+            alert += f"\nRead: {trade['link']}"
         alert += "\n---"
 
         return alert

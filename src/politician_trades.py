@@ -42,13 +42,19 @@ class PoliticianTradeTracker:
             json.dump(list(self.seen_trades), f)
 
     def get_recent_trades(self) -> List[Dict]:
-        """Fetch and analyze Congress trades from Google News"""
+        """Fetch and analyze Congress trades from multiple sources"""
         trades = []
 
         print("[DEBUG] Fetching Congress trading news from Google News...")
         google_trades = self._fetch_and_analyze_google_news()
         print(f"[DEBUG] Found {len(google_trades)} trades with extracted ticker info")
         trades.extend(google_trades)
+        time.sleep(1)
+
+        print("[DEBUG] Fetching Congress trades from Reddit r/tradewithcongress...")
+        reddit_trades = self._fetch_reddit_trades()
+        print(f"[DEBUG] Found {len(reddit_trades)} trades from Reddit")
+        trades.extend(reddit_trades)
 
         self._save_seen_trades()
         return trades[:20]
@@ -238,6 +244,104 @@ class PoliticianTradeTracker:
 
         return "Congress Member"
 
+    def _fetch_reddit_trades(self) -> List[Dict]:
+        """Fetch Congress trades from r/tradewithcongress subreddit"""
+        trades = []
+
+        try:
+            # Fetch recent posts from the subreddit
+            url = "https://www.reddit.com/r/tradewithcongress/new.json"
+            print(f"[DEBUG] Fetching Reddit from {url}")
+
+            response = requests.get(url, headers=self.headers, timeout=15)
+
+            if response.status_code == 200:
+                print(f"[DEBUG] Got 200 from Reddit")
+                data = response.json()
+                posts = data.get('data', {}).get('children', [])
+                print(f"[DEBUG] Found {len(posts)} posts on Reddit")
+
+                for post_data in posts[:30]:
+                    try:
+                        post = post_data.get('data', {})
+                        title = post.get('title', '')
+                        selftext = post.get('selftext', '')
+                        author = post.get('author', 'Unknown')
+                        created = post.get('created_utc', 0)
+                        url_post = post.get('url', '')
+                        score = post.get('score', 0)
+
+                        if not title or score < 0:
+                            continue
+
+                        combined_text = f"{title} {selftext}".lower()
+
+                        # Extract ticker
+                        ticker = self._extract_ticker(combined_text)
+                        if not ticker:
+                            continue
+
+                        # Determine action
+                        action = self._determine_action(combined_text)
+
+                        # Extract politician name from title
+                        politician = self._extract_politician_name_from_reddit(title)
+
+                        if not politician or politician == "Congress Member":
+                            # Try to extract from post content
+                            if 'rep' in title.lower() or 'sen' in title.lower():
+                                politician = title[:60]
+                            else:
+                                continue
+
+                        # Create trade ID
+                        trade_id = f"reddit_{ticker}_{politician}_{created}"
+
+                        if trade_id not in self.seen_trades:
+                            trades.append({
+                                'politician_name': politician,
+                                'ticker': ticker,
+                                'transaction_type': action,
+                                'amount': 'See Reddit Post',
+                                'transaction_date': datetime.fromtimestamp(created).strftime('%Y-%m-%d'),
+                                'summary': title[:100],
+                                'id': trade_id,
+                                'link': f"https://reddit.com{url_post}",
+                                'source': 'r/tradewithcongress'
+                            })
+                            self.seen_trades.add(trade_id)
+                            print(f"[DEBUG] ✅ Added Reddit trade: {politician} {action} {ticker}")
+
+                    except Exception as e:
+                        print(f"[DEBUG] Error processing Reddit post: {e}")
+                        continue
+
+            else:
+                print(f"[DEBUG] Got {response.status_code} from Reddit")
+
+        except Exception as e:
+            print(f"[DEBUG] Error fetching Reddit: {e}")
+
+        return trades
+
+    def _extract_politician_name_from_reddit(self, text: str) -> str:
+        """Extract politician name from Reddit post title"""
+        # Look for "Rep./Sen. Name" patterns
+        patterns = [
+            r'(?:Rep|Representative|Sen|Senator|Congressman|Congresswoman)\s+(\w+\s+\w+)',
+            r'(\w+\s+\w+)\s+(?:Rep|Representative|Sen|Senator|Congressman|Congresswoman)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                if len(name) > 3 and len(name) < 50:
+                    print(f"[DEBUG] Extracted Reddit politician: {name}")
+                    return name
+
+        return "Congress Member"
+
     def format_trade_alert(self, trade: Dict) -> str:
         """Format a trade into readable alert text"""
         politician = trade.get('politician_name', 'Unknown')
@@ -246,12 +350,13 @@ class PoliticianTradeTracker:
         date = trade.get('transaction_date', 'Unknown')
         summary = trade.get('summary', '')
         link = trade.get('link', '')
+        source = trade.get('source', 'News')
 
-        alert = f"📊 CONGRESS STOCK TRADE\n{politician}\n{action} {ticker}\nDate: {date}"
+        alert = f"📊 CONGRESS STOCK TRADE\n{politician}\n{action} {ticker}\nDate: {date}\nSource: {source}"
         if summary:
             alert += f"\nHeadline: {summary[:60]}"
         if link:
-            alert += f"\nRead: {link[:60]}..."
+            alert += f"\nRead: {link[:80]}"
         alert += "\n---"
 
         return alert

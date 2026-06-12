@@ -245,74 +245,76 @@ class PoliticianTradeTracker:
         return "Congress Member"
 
     def _fetch_reddit_trades(self) -> List[Dict]:
-        """Fetch Congress trades from r/tradewithcongress subreddit"""
+        """Fetch Congress trades from r/tradewithcongress subreddit via RSS"""
         trades = []
 
         try:
-            # Fetch recent posts from the subreddit with better headers
-            url = "https://www.reddit.com/r/tradewithcongress/new.json"
-            print(f"[DEBUG] Fetching Reddit from {url}")
+            # Use Reddit RSS feed - designed for public consumption
+            rss_urls = [
+                "https://www.reddit.com/r/tradewithcongress/new/.rss",
+                "https://www.reddit.com/r/tradewithcongress/hot/.rss",
+                "https://www.reddit.com/r/tradewithcongress/.rss",
+            ]
 
-            # Reddit requires better headers to not block requests
             reddit_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-                'Accept': 'application/json',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Referer': 'https://www.reddit.com/r/tradewithcongress/',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/rss+xml,application/xml',
             }
 
-            response = requests.get(url, headers=reddit_headers, timeout=15)
-
-            if response.status_code == 200:
-                print(f"[DEBUG] Got 200 from Reddit")
+            for rss_url in rss_urls:
                 try:
-                    data = response.json()
-                    posts = data.get('data', {}).get('children', [])
-                    print(f"[DEBUG] Found {len(posts)} posts on Reddit")
-                except:
-                    print(f"[DEBUG] Failed to parse Reddit JSON, trying HTML fallback...")
-                    posts = []
-            elif response.status_code == 403:
-                print(f"[DEBUG] Reddit returned 403 - trying HTML scrape fallback...")
-                # Try HTML scraping as fallback
-                html_url = "https://www.reddit.com/r/tradewithcongress/new/"
-                html_response = requests.get(html_url, headers=reddit_headers, timeout=15)
-                if html_response.status_code == 200:
-                    soup = BeautifulSoup(html_response.content, 'html.parser')
-                    # Find post links
-                    post_links = soup.find_all('a', {'data-testid': 'post-title'})
-                    print(f"[DEBUG] Found {len(post_links)} posts via HTML scrape")
-                    for link in post_links[:15]:
-                        try:
-                            title = link.text.strip()
-                            if title and any(kw in title.lower() for kw in ['trade', 'buy', 'sell', 'stock', 'rep', 'sen']):
-                                # Create a mock post structure
-                                posts.append({
-                                    'data': {
-                                        'title': title,
-                                        'selftext': '',
-                                        'author': 'Unknown',
-                                        'created_utc': int(datetime.now().timestamp()),
-                                        'url': '/r/tradewithcongress/',
-                                        'score': 0
-                                    }
-                                })
-                        except:
-                            continue
-                else:
-                    print(f"[DEBUG] HTML fallback also failed with {html_response.status_code}")
-                    posts = []
-            else:
-                print(f"[DEBUG] Got {response.status_code} from Reddit")
-                posts = []
+                    print(f"[DEBUG] Trying Reddit RSS from {rss_url}")
+                    response = requests.get(rss_url, headers=reddit_headers, timeout=15)
+
+                    if response.status_code == 200:
+                        print(f"[DEBUG] Got 200 from Reddit RSS")
+                        root = ET.fromstring(response.content)
+                        items = root.findall('.//item')
+                        print(f"[DEBUG] Found {len(items)} Reddit posts in RSS feed")
+
+                        posts = []
+                        for item in items:
+                            try:
+                                title_elem = item.find('title')
+                                description_elem = item.find('description')
+                                link_elem = item.find('link')
+                                author_elem = item.find('author')
+                                pubdate_elem = item.find('pubDate')
+
+                                title = title_elem.text if title_elem is not None else ''
+                                description = description_elem.text if description_elem is not None else ''
+                                link = link_elem.text if link_elem is not None else ''
+                                author = author_elem.text if author_elem is not None else 'Unknown'
+                                pubdate = pubdate_elem.text if pubdate_elem is not None else str(datetime.now())
+
+                                if title:
+                                    posts.append({
+                                        'data': {
+                                            'title': title,
+                                            'selftext': description,
+                                            'author': author,
+                                            'created_utc': int(datetime.now().timestamp()),
+                                            'url': link,
+                                            'score': 0
+                                        }
+                                    })
+                            except Exception as e:
+                                continue
+
+                        if posts:
+                            print(f"[DEBUG] Successfully got {len(posts)} posts from RSS")
+                            break
+                    else:
+                        print(f"[DEBUG] Got {response.status_code} from Reddit RSS")
+
+                except Exception as e:
+                    print(f"[DEBUG] Error with Reddit RSS {rss_url}: {e}")
+                    continue
+
+                time.sleep(1)
 
             if not posts:
+                print(f"[DEBUG] No posts found from any Reddit RSS feed")
                 return trades
 
             for post_data in posts[:30]:

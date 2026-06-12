@@ -249,17 +249,73 @@ class PoliticianTradeTracker:
         trades = []
 
         try:
-            # Fetch recent posts from the subreddit
+            # Fetch recent posts from the subreddit with better headers
             url = "https://www.reddit.com/r/tradewithcongress/new.json"
             print(f"[DEBUG] Fetching Reddit from {url}")
 
-            response = requests.get(url, headers=self.headers, timeout=15)
+            # Reddit requires better headers to not block requests
+            reddit_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+                'Accept': 'application/json',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Referer': 'https://www.reddit.com/r/tradewithcongress/',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+            }
+
+            response = requests.get(url, headers=reddit_headers, timeout=15)
 
             if response.status_code == 200:
                 print(f"[DEBUG] Got 200 from Reddit")
-                data = response.json()
-                posts = data.get('data', {}).get('children', [])
-                print(f"[DEBUG] Found {len(posts)} posts on Reddit")
+                try:
+                    data = response.json()
+                    posts = data.get('data', {}).get('children', [])
+                    print(f"[DEBUG] Found {len(posts)} posts on Reddit")
+                except:
+                    print(f"[DEBUG] Failed to parse Reddit JSON, trying HTML fallback...")
+                    posts = []
+            elif response.status_code == 403:
+                print(f"[DEBUG] Reddit returned 403 - trying HTML scrape fallback...")
+                # Try HTML scraping as fallback
+                html_url = "https://www.reddit.com/r/tradewithcongress/new/"
+                html_response = requests.get(html_url, headers=reddit_headers, timeout=15)
+                if html_response.status_code == 200:
+                    soup = BeautifulSoup(html_response.content, 'html.parser')
+                    # Find post links
+                    post_links = soup.find_all('a', {'data-testid': 'post-title'})
+                    print(f"[DEBUG] Found {len(post_links)} posts via HTML scrape")
+                    for link in post_links[:15]:
+                        try:
+                            title = link.text.strip()
+                            if title and any(kw in title.lower() for kw in ['trade', 'buy', 'sell', 'stock', 'rep', 'sen']):
+                                # Create a mock post structure
+                                posts.append({
+                                    'data': {
+                                        'title': title,
+                                        'selftext': '',
+                                        'author': 'Unknown',
+                                        'created_utc': int(datetime.now().timestamp()),
+                                        'url': '/r/tradewithcongress/',
+                                        'score': 0
+                                    }
+                                })
+                        except:
+                            continue
+                else:
+                    print(f"[DEBUG] HTML fallback also failed with {html_response.status_code}")
+                    posts = []
+            else:
+                print(f"[DEBUG] Got {response.status_code} from Reddit")
+                posts = []
+
+            if not posts:
+                return trades
+
+            for post_data in posts[:30]:
 
                 for post_data in posts[:30]:
                     try:

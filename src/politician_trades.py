@@ -42,19 +42,13 @@ class PoliticianTradeTracker:
             json.dump(list(self.seen_trades), f)
 
     def get_recent_trades(self) -> List[Dict]:
-        """Fetch and analyze Congress trades from multiple sources"""
+        """Fetch and analyze Congress trades from Google News"""
         trades = []
 
         print("[DEBUG] Fetching Congress trading news from Google News...")
         google_trades = self._fetch_and_analyze_google_news()
         print(f"[DEBUG] Found {len(google_trades)} trades with extracted ticker info")
         trades.extend(google_trades)
-        time.sleep(1)
-
-        print("[DEBUG] Fetching Congress trades from Reddit r/tradewithcongress...")
-        reddit_trades = self._fetch_reddit_trades()
-        print(f"[DEBUG] Found {len(reddit_trades)} trades from Reddit")
-        trades.extend(reddit_trades)
 
         self._save_seen_trades()
         return trades[:20]
@@ -244,162 +238,6 @@ class PoliticianTradeTracker:
 
         return "Congress Member"
 
-    def _fetch_reddit_trades(self) -> List[Dict]:
-        """Fetch Congress trades from r/tradewithcongress subreddit via RSS"""
-        trades = []
-
-        try:
-            # Use Reddit RSS feed - designed for public consumption
-            rss_urls = [
-                "https://www.reddit.com/r/tradewithcongress/new/.rss",
-                "https://www.reddit.com/r/tradewithcongress/hot/.rss",
-                "https://www.reddit.com/r/tradewithcongress/.rss",
-            ]
-
-            reddit_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/rss+xml,application/xml',
-            }
-
-            for rss_url in rss_urls:
-                try:
-                    print(f"[DEBUG] Trying Reddit RSS from {rss_url}")
-                    response = requests.get(rss_url, headers=reddit_headers, timeout=15)
-
-                    if response.status_code == 200:
-                        print(f"[DEBUG] Got 200 from Reddit RSS")
-                        root = ET.fromstring(response.content)
-                        items = root.findall('.//item')
-                        print(f"[DEBUG] Found {len(items)} Reddit posts in RSS feed")
-
-                        posts = []
-                        for item in items:
-                            try:
-                                title_elem = item.find('title')
-                                description_elem = item.find('description')
-                                link_elem = item.find('link')
-                                author_elem = item.find('author')
-                                pubdate_elem = item.find('pubDate')
-
-                                title = title_elem.text if title_elem is not None else ''
-                                description = description_elem.text if description_elem is not None else ''
-                                link = link_elem.text if link_elem is not None else ''
-                                author = author_elem.text if author_elem is not None else 'Unknown'
-                                pubdate = pubdate_elem.text if pubdate_elem is not None else str(datetime.now())
-
-                                if title:
-                                    posts.append({
-                                        'data': {
-                                            'title': title,
-                                            'selftext': description,
-                                            'author': author,
-                                            'created_utc': int(datetime.now().timestamp()),
-                                            'url': link,
-                                            'score': 0
-                                        }
-                                    })
-                            except Exception as e:
-                                continue
-
-                        if posts:
-                            print(f"[DEBUG] Successfully got {len(posts)} posts from RSS")
-                            break
-                    else:
-                        print(f"[DEBUG] Got {response.status_code} from Reddit RSS")
-
-                except Exception as e:
-                    print(f"[DEBUG] Error with Reddit RSS {rss_url}: {e}")
-                    continue
-
-                time.sleep(1)
-
-            if not posts:
-                print(f"[DEBUG] No posts found from any Reddit RSS feed")
-                return trades
-
-            for post_data in posts[:30]:
-
-                for post_data in posts[:30]:
-                    try:
-                        post = post_data.get('data', {})
-                        title = post.get('title', '')
-                        selftext = post.get('selftext', '')
-                        author = post.get('author', 'Unknown')
-                        created = post.get('created_utc', 0)
-                        url_post = post.get('url', '')
-                        score = post.get('score', 0)
-
-                        if not title or score < 0:
-                            continue
-
-                        combined_text = f"{title} {selftext}".lower()
-
-                        # Extract ticker
-                        ticker = self._extract_ticker(combined_text)
-                        if not ticker:
-                            continue
-
-                        # Determine action
-                        action = self._determine_action(combined_text)
-
-                        # Extract politician name from title
-                        politician = self._extract_politician_name_from_reddit(title)
-
-                        if not politician or politician == "Congress Member":
-                            # Try to extract from post content
-                            if 'rep' in title.lower() or 'sen' in title.lower():
-                                politician = title[:60]
-                            else:
-                                continue
-
-                        # Create trade ID
-                        trade_id = f"reddit_{ticker}_{politician}_{created}"
-
-                        if trade_id not in self.seen_trades:
-                            trades.append({
-                                'politician_name': politician,
-                                'ticker': ticker,
-                                'transaction_type': action,
-                                'amount': 'See Reddit Post',
-                                'transaction_date': datetime.fromtimestamp(created).strftime('%Y-%m-%d'),
-                                'summary': title[:100],
-                                'id': trade_id,
-                                'link': f"https://reddit.com{url_post}",
-                                'source': 'r/tradewithcongress'
-                            })
-                            self.seen_trades.add(trade_id)
-                            print(f"[DEBUG] ✅ Added Reddit trade: {politician} {action} {ticker}")
-
-                    except Exception as e:
-                        print(f"[DEBUG] Error processing Reddit post: {e}")
-                        continue
-
-            else:
-                print(f"[DEBUG] Got {response.status_code} from Reddit")
-
-        except Exception as e:
-            print(f"[DEBUG] Error fetching Reddit: {e}")
-
-        return trades
-
-    def _extract_politician_name_from_reddit(self, text: str) -> str:
-        """Extract politician name from Reddit post title"""
-        # Look for "Rep./Sen. Name" patterns
-        patterns = [
-            r'(?:Rep|Representative|Sen|Senator|Congressman|Congresswoman)\s+(\w+\s+\w+)',
-            r'(\w+\s+\w+)\s+(?:Rep|Representative|Sen|Senator|Congressman|Congresswoman)',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                name = match.group(1).strip()
-                if len(name) > 3 and len(name) < 50:
-                    print(f"[DEBUG] Extracted Reddit politician: {name}")
-                    return name
-
-        return "Congress Member"
-
     def format_trade_alert(self, trade: Dict) -> str:
         """Format a trade into readable alert text"""
         politician = trade.get('politician_name', 'Unknown')
@@ -408,9 +246,8 @@ class PoliticianTradeTracker:
         date = trade.get('transaction_date', 'Unknown')
         summary = trade.get('summary', '')
         link = trade.get('link', '')
-        source = trade.get('source', 'News')
 
-        alert = f"📊 CONGRESS STOCK TRADE\n{politician}\n{action} {ticker}\nDate: {date}\nSource: {source}"
+        alert = f"📊 CONGRESS STOCK TRADE\n{politician}\n{action} {ticker}\nDate: {date}\nSource: Google News"
         if summary:
             alert += f"\nHeadline: {summary[:60]}"
         if link:

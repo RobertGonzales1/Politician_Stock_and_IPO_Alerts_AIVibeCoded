@@ -218,38 +218,46 @@ class PoliticianTradeTracker:
 
         for cik, name in self.congressional_ciks.items():
             try:
-                print(f"[DEBUG] Checking {name} (CIK: {cik})")
+                # print(f"[DEBUG] Checking {name} (CIK: {cik})")
 
                 url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
                 response = self.session.get(url, headers=self.headers, timeout=15)
 
                 if response.status_code == 200:
-                    data = response.json()
-                    filings = data.get('filings', {}).get('recent', {})
-                    forms = filings.get('form', [])
+                    try:
+                        data = response.json()
+                        filings = data.get('filings', {}).get('recent', {})
+                        forms = filings.get('form', [])
 
-                    # Find recent Form 4s
-                    for i, form in enumerate(forms[:20]):
-                        if form == '4':
-                            filing_date = filings.get('filingDate', [])[i]
-                            trade_id = f"sec_{cik}_{filing_date}"
+                        # Find recent Form 4s
+                        form4_count = sum(1 for f in forms if f == '4')
+                        if form4_count > 0:
+                            print(f"[DEBUG] {name} has {form4_count} Form 4 filings")
 
-                            if trade_id not in self.seen_trades:
-                                trades.append({
-                                    'politician_name': name,
-                                    'ticker': 'PENDING',
-                                    'transaction_type': 'Form 4',
-                                    'amount': 'See SEC',
-                                    'transaction_date': filing_date,
-                                    'summary': f'Form 4: {name}',
-                                    'id': trade_id,
-                                    'source': 'SEC Form 4 (API)',
-                                    'link': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=4"
-                                })
-                                self.seen_trades.add(trade_id)
-                                print(f"[DEBUG] ✅ Added {name} Form 4")
+                            for i, form in enumerate(forms[:50]):
+                                if form == '4':
+                                    filing_date = filings.get('filingDate', [])[i]
+                                    trade_id = f"sec_{cik}_{filing_date}"
 
-                time.sleep(1)
+                                    if trade_id not in self.seen_trades:
+                                        trades.append({
+                                            'politician_name': name,
+                                            'ticker': 'PENDING',
+                                            'transaction_type': 'Form 4',
+                                            'amount': 'See SEC',
+                                            'transaction_date': filing_date,
+                                            'summary': f'Form 4: {name}',
+                                            'id': trade_id,
+                                            'source': 'SEC Form 4 (API)',
+                                            'link': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=4"
+                                        })
+                                        self.seen_trades.add(trade_id)
+                                        print(f"[DEBUG] ✅ Added {name} Form 4 ({filing_date})")
+
+                    except json.JSONDecodeError as e:
+                        print(f"[DEBUG] Invalid JSON for {name}: {str(e)[:40]}")
+
+                time.sleep(0.5)
 
             except Exception as e:
                 print(f"[DEBUG] Error with {name}: {str(e)[:60]}")
@@ -298,7 +306,7 @@ class PoliticianTradeTracker:
                 items = root.findall('.//item')
                 print(f"[DEBUG] Found {len(items)} Google News items")
 
-                for item in items[:20]:
+                for item in items[:25]:
                     try:
                         title_elem = item.find('title')
                         description_elem = item.find('description')
@@ -310,29 +318,32 @@ class PoliticianTradeTracker:
                         description = description_elem.text if description_elem is not None else ''
                         combined_text = f"{title} {description}".lower()
 
-                        # Extract ticker and action from title/description
+                        # Extract info from title/description
                         ticker = self._extract_ticker_from_text(combined_text)
                         action = self._determine_action_from_text(combined_text)
                         politician = self._extract_politician_from_news(title)
 
-                        trade_id = f"gnews_{title}_{datetime.now().date()}"
+                        trade_id = f"gnews_{title[:50]}_{datetime.now().date()}"
 
-                        if trade_id not in self.seen_trades and ticker and action:
-                            trades.append({
-                                'politician_name': politician,
-                                'ticker': ticker,
-                                'transaction_type': action,
-                                'amount': 'See Article',
-                                'transaction_date': datetime.now().strftime('%Y-%m-%d'),
-                                'summary': title[:80],
-                                'id': trade_id,
-                                'source': 'Google News',
-                                'link': ''
-                            })
-                            self.seen_trades.add(trade_id)
-                            print(f"[DEBUG] Added Google News: {politician} {action} {ticker}")
+                        if trade_id not in self.seen_trades:
+                            # Accept trades with at least a ticker OR if it mentions Congress trading
+                            if ticker or 'congress' in combined_text or 'stock trade' in combined_text or 'senator' in combined_text or 'representative' in combined_text:
+                                trades.append({
+                                    'politician_name': politician,
+                                    'ticker': ticker if ticker else 'N/A',
+                                    'transaction_type': action if action else 'TRADE 📊',
+                                    'amount': 'See Article',
+                                    'transaction_date': datetime.now().strftime('%Y-%m-%d'),
+                                    'summary': title[:80],
+                                    'id': trade_id,
+                                    'source': 'Google News',
+                                    'link': ''
+                                })
+                                self.seen_trades.add(trade_id)
+                                print(f"[DEBUG] Added Google News: {politician} {action if action else 'TRADE'} {ticker if ticker else 'TBD'}")
 
                     except Exception as e:
+                        print(f"[DEBUG] Error in Google News item: {str(e)[:40]}")
                         continue
 
         except Exception as e:

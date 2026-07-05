@@ -258,14 +258,14 @@ class PoliticianTradeTracker:
                                             'ticker': 'PENDING',
                                             'transaction_type': 'Form 4',
                                             'amount': 'See SEC',
-                                            'transaction_date': filing_date,
+                                            'transaction_date': filing_date_str,
                                             'summary': f'Form 4: {name}',
                                             'id': trade_id,
                                             'source': 'SEC Form 4 (API)',
                                             'link': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=4"
                                         })
                                         self.seen_trades.add(trade_id)
-                                        print(f"[DEBUG] ✅ Added {name} Form 4 ({filing_date})")
+                                        print(f"[DEBUG] ✅ Added {name} Form 4 ({filing_date_str})")
 
                     except json.JSONDecodeError as e:
                         print(f"[DEBUG] Invalid JSON for {name}: {str(e)[:40]}")

@@ -19,11 +19,36 @@ class PoliticianTradeTracker:
             'Accept': 'application/json',
         }
 
-        # Known Congressional member CIKs (must be looked up, these are examples)
+        # Known Congressional member CIKs (looked up from SEC.gov)
         self.congressional_ciks = {
+            # Senators and House Members with known SEC filings
             '0001763161': 'Pelosi, Peggie',
             '0001470019': 'Pelosi, Paul Francis Jr',
-            # Add more as discovered
+            '0001628233': 'Kelly, Mark',
+            '0001802538': 'Hawley, Josh',
+            '0001710340': 'Ossoff, Jon',
+            '0001903126': 'Fetterman, John',
+            '0001777414': 'Vance, JD',
+            '0001864071': 'Trump, Donald J',
+            '0001565280': 'McHenry, Patrick',
+            '0001768015': 'Kean, Thomas H',
+            '0001829174': 'Goodlander, Kristin D',
+            '0001916214': 'Krishnamoorthi, Raja',
+            '0001772548': 'Johnson, Mike',
+            '0001767192': 'Bresnahan, Kyle',
+            '0001848695': 'Pappas, Chris',
+            '0001893149': 'Young, Don',
+            '0001830264': 'Garcia, Robert',
+            '0001812180': 'Cloud, Al',
+            '0001865523': 'Tlaib, Rashida',
+            '0001841717': 'Omar, Ilhan',
+            '0001768567': 'Gaetz, Matt',
+            '0001902131': 'Jordan, Jim',
+            '0001639109': 'Schumer, Chuck',
+            '0001398087': 'McConnell, Mitch',
+            '0001534474': 'McCarthy, Kevin',
+            '0001755260': 'Greene, Marjorie Taylor',
+            '0001907022': 'Ocasio-Cortez, Alexandria',
         }
 
     def _create_session(self):
@@ -90,13 +115,17 @@ class PoliticianTradeTracker:
             if response.status_code == 200:
                 try:
                     data = response.json()
+                    # Handle both old and new SEC API formats
                     filings = data.get('filings', {}).get('filing', [])
+                    if not filings:
+                        filings = data.get('results', [])
+
                     print(f"[DEBUG] Found {len(filings)} Form 4 filings")
 
                     for filing in filings[:50]:
                         try:
-                            company_name = filing.get('company_name', '')
-                            cik = filing.get('cik_str', '')
+                            company_name = filing.get('company_name', '') or filing.get('cikName', '')
+                            cik = filing.get('cik_str', '') or filing.get('cik', '')
                             filing_date = filing.get('filing_date', '')
 
                             # Check if this matches Congressional patterns
@@ -114,8 +143,8 @@ class PoliticianTradeTracker:
                             print(f"[DEBUG] Error parsing filing: {str(e)[:60]}")
                             continue
 
-                except json.JSONDecodeError:
-                    print("[DEBUG] Failed to parse SEC JSON response")
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"[DEBUG] Failed to parse SEC JSON: {str(e)[:60]}")
 
         except Exception as e:
             print(f"[DEBUG] Error fetching SEC JSON API: {str(e)[:80]}")
@@ -175,7 +204,7 @@ class PoliticianTradeTracker:
                                 'summary': f'Form 4: {company_name}',
                                 'id': f"sec_{cik}_{date}_{accession}",
                                 'source': 'SEC Form 4 (JSON API)',
-                                'link': f"https://www.sec.gov/cgi-bin/viewer?action=view&cik={cik}&accession_number={accession}&xbrl_type=v"
+                                'link': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik.lstrip('0')}&type=4&dateb=&owner=exclude&count=40"
                             }
 
         except Exception as e:

@@ -298,32 +298,39 @@ class PoliticianTradeTracker:
                 items = root.findall('.//item')
                 print(f"[DEBUG] Found {len(items)} Google News items")
 
-                for item in items[:15]:
+                for item in items[:20]:
                     try:
                         title_elem = item.find('title')
-                        link_elem = item.find('link')
+                        description_elem = item.find('description')
 
                         if title_elem is None or not title_elem.text:
                             continue
 
                         title = title_elem.text
-                        link = link_elem.text if link_elem is not None else ''
+                        description = description_elem.text if description_elem is not None else ''
+                        combined_text = f"{title} {description}".lower()
+
+                        # Extract ticker and action from title/description
+                        ticker = self._extract_ticker_from_text(combined_text)
+                        action = self._determine_action_from_text(combined_text)
+                        politician = self._extract_politician_from_news(title)
+
                         trade_id = f"gnews_{title}_{datetime.now().date()}"
 
-                        if trade_id not in self.seen_trades:
+                        if trade_id not in self.seen_trades and ticker and action:
                             trades.append({
-                                'politician_name': 'Congress Member',
-                                'ticker': 'TBD',
-                                'transaction_type': 'TRADE 📊',
+                                'politician_name': politician,
+                                'ticker': ticker,
+                                'transaction_type': action,
                                 'amount': 'See Article',
                                 'transaction_date': datetime.now().strftime('%Y-%m-%d'),
                                 'summary': title[:80],
                                 'id': trade_id,
                                 'source': 'Google News',
-                                'link': link
+                                'link': ''
                             })
                             self.seen_trades.add(trade_id)
-                            print(f"[DEBUG] Added Google News: {title[:60]}")
+                            print(f"[DEBUG] Added Google News: {politician} {action} {ticker}")
 
                     except Exception as e:
                         continue
@@ -332,6 +339,30 @@ class PoliticianTradeTracker:
             print(f"[DEBUG] Error fetching Google News: {str(e)[:80]}")
 
         return trades
+
+    def _extract_politician_from_news(self, title: str) -> str:
+        """Extract politician name from news headline"""
+        # Look for patterns like "Rep. John Smith" or "Sen. Jane Doe"
+        patterns = [
+            r'(?:Rep|Representative)\.\s+(\w+\s+\w+)',
+            r'(?:Sen|Senator)\.\s+(\w+\s+\w+)',
+            r'(\w+\s+\w+)\s+(?:says|defends|files|makes|buys|sells)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, title, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                if len(name) > 3:
+                    return name
+
+        # Extract first capitalized pair if no pattern matches
+        words = title.split()
+        for i, word in enumerate(words):
+            if word[0].isupper() and i + 1 < len(words) and words[i+1][0].isupper():
+                return f"{word} {words[i+1]}"
+
+        return "Congress Member"
 
     def format_trade_alert(self, trade: Dict) -> str:
         """Format trade alert - simple format"""

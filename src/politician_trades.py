@@ -253,19 +253,30 @@ class PoliticianTradeTracker:
                                     trade_id = f"sec_{cik}_{filing_date_str}"
 
                                     if trade_id not in self.seen_trades:
+                                        # Try to get accession number and extract real ticker data
+                                        accession = filings.get('accessionNumber', [])[i] if i < len(filings.get('accessionNumber', [])) else None
+
+                                        if accession:
+                                            ticker_data = self._extract_form4_ticker_and_action(cik, accession)
+                                            ticker = ticker_data.get('ticker', 'TBD')
+                                            action = ticker_data.get('action', 'TRADE 📊')
+                                        else:
+                                            ticker = 'TBD'
+                                            action = 'TRADE 📊'
+
                                         trades.append({
                                             'politician_name': name,
-                                            'ticker': 'PENDING',
-                                            'transaction_type': 'Form 4',
+                                            'ticker': ticker,
+                                            'transaction_type': action,
                                             'amount': 'See SEC',
                                             'transaction_date': filing_date_str,
                                             'summary': f'Form 4: {name}',
                                             'id': trade_id,
-                                            'source': 'SEC Form 4 (API)',
+                                            'source': 'SEC Form 4',
                                             'link': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=4"
                                         })
                                         self.seen_trades.add(trade_id)
-                                        print(f"[DEBUG] ✅ Added {name} Form 4 ({filing_date_str})")
+                                        print(f"[DEBUG] ✅ Added {name} Form 4 ({filing_date_str}) - {ticker}")
 
                     except json.JSONDecodeError as e:
                         print(f"[DEBUG] Invalid JSON for {name}: {str(e)[:40]}")
@@ -409,6 +420,51 @@ class PoliticianTradeTracker:
             return 'SELL 📉'
         else:
             return 'TRADE 📊'
+
+    def _extract_form4_ticker_and_action(self, cik: str, accession: str) -> Dict:
+        """Extract actual ticker and transaction type from Form 4 document"""
+        try:
+            # Get the Form 4 document
+            # Remove hyphens from accession for URL
+            accession_clean = accession.replace('-', '')
+            url = f"https://www.sec.gov/Archives/edgar/{cik}/{accession_clean}/{accession}-index.html"
+
+            response = self.session.get(url, headers=self.headers, timeout=10)
+
+            if response.status_code == 200:
+                # Look for the XML file link
+                soup = BeautifulSoup(response.content, 'html.parser')
+                links = soup.find_all('a', href=True)
+
+                for link in links:
+                    href = link.get('href', '')
+                    if href.endswith('.xml'):
+                        # Found XML file, fetch it
+                        xml_url = f"https://www.sec.gov/Archives/edgar/{cik}/{accession_clean}/{href}"
+                        xml_response = self.session.get(xml_url, headers=self.headers, timeout=10)
+
+                        if xml_response.status_code == 200:
+                            # Parse XML to extract ticker and transaction type
+                            text = xml_response.text.lower()
+
+                            # Extract ticker
+                            ticker_match = re.search(r'<name>([A-Z]{1,5})</name>', text)
+                            ticker = ticker_match.group(1) if ticker_match else None
+
+                            # Determine action
+                            action = 'TRADE 📊'
+                            if 'open market purchase' in text or 'acquire' in text:
+                                action = 'BUY 📈'
+                            elif 'open market sale' in text or 'dispose' in text:
+                                action = 'SELL 📉'
+
+                            if ticker:
+                                return {'ticker': ticker, 'action': action}
+
+        except Exception as e:
+            print(f"[DEBUG] Error extracting Form 4 ticker: {str(e)[:40]}")
+
+        return {'ticker': 'TBD', 'action': 'TRADE 📊'}
 
     def _extract_politician_from_news(self, title: str) -> str:
         """Extract politician name from news headline"""

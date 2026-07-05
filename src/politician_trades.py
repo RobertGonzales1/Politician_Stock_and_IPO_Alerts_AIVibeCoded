@@ -13,21 +13,18 @@ class PoliticianTradeTracker:
         self.seen_trades = self._load_seen_trades()
         self.session = self._create_session()
 
+        # SEC requires proper User-Agent
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Cache-Control': 'max-age=0',
-            'Referer': 'https://www.sec.gov/',
+            'User-Agent': 'PoliticianStockAlerts/1.0 (rvg2151@gmail.com)',
+            'Accept': 'application/json',
         }
 
-        # Congressional/political figure patterns
-        self.political_keywords = [
-            'trust', 'foundation', 'pac', 'committee',
-            'trump', 'biden', 'harris', 'pence', 'pelosi', 'mccarthy', 'schumer', 'mcconnell',
-            'gaetz', 'jordan', 'omar', 'tlaib', 'ossoff', 'fetterman', 'kean', 'vance',
-            'johnson', 'goodlander', 'krishnamoorthi'
-        ]
+        # Known Congressional member CIKs (must be looked up, these are examples)
+        self.congressional_ciks = {
+            '0001763161': 'Pelosi, Peggie',
+            '0001470019': 'Pelosi, Paul Francis Jr',
+            # Add more as discovered
+        }
 
     def _create_session(self):
         """Create requests session with retry strategy"""
@@ -57,18 +54,18 @@ class PoliticianTradeTracker:
             json.dump(list(self.seen_trades), f)
 
     def get_recent_trades(self) -> List[Dict]:
-        """Fetch Congress trades from both SEC (primary) and Google News (supplementary)"""
+        """Fetch Congress trades from SEC JSON API (official source) + Google News"""
         trades = []
 
         print("[DEBUG] === FETCHING CONGRESS TRADES ===")
 
-        # Primary source: SEC Form 4 filings
-        print("[DEBUG] Fetching from SEC Form 4 filings (primary)...")
-        sec_trades = self._fetch_sec_form4_filings()
-        print(f"[DEBUG] Found {len(sec_trades)} trades from SEC")
+        # Primary: SEC JSON API
+        print("[DEBUG] Fetching from SEC data.sec.gov JSON API (primary)...")
+        sec_trades = self._fetch_sec_json_api_trades()
+        print(f"[DEBUG] Found {len(sec_trades)} trades from SEC API")
         trades.extend(sec_trades)
 
-        # Supplementary source: Google News
+        # Supplementary: Google News
         print("[DEBUG] Fetching from Google News (supplementary)...")
         google_trades = self._fetch_google_news_trades()
         print(f"[DEBUG] Found {len(google_trades)} trades from Google News")
@@ -77,180 +74,182 @@ class PoliticianTradeTracker:
         self._save_seen_trades()
         return trades[:20]
 
-    def _fetch_sec_form4_filings(self) -> List[Dict]:
-        """Fetch Form 4 filings from SEC - primary method"""
+    def _fetch_sec_json_api_trades(self) -> List[Dict]:
+        """Fetch Form 4 filings from SEC's official JSON API"""
         trades = []
 
         try:
-            # Check last 3 days for filings
-            dates_to_check = [datetime.now() - timedelta(days=i) for i in range(3)]
+            # Method 1: Query recent Form 4s
+            print("[DEBUG] Querying SEC for recent Form 4 filings...")
+            url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=4&dateb=&owner=exclude&count=100&output=json"
 
-            for date in dates_to_check:
-                date_str = date.strftime('%Y%m%d')
-                print(f"\n[DEBUG] === Checking SEC Form 4 filings for {date_str} ===")
+            print(f"[DEBUG] Fetching: {url[:80]}")
+            response = self.session.get(url, headers=self.headers, timeout=25)
+            print(f"[DEBUG] SEC Response: {response.status_code}")
 
-                # Primary SEC endpoint for Form 4 filings
-                url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=4&dateb={date_str}&owner=exclude&count=100&search_text="
-
+            if response.status_code == 200:
                 try:
-                    print(f"[DEBUG] Fetching from SEC: {url[:80]}")
-                    response = self.session.get(url, headers=self.headers, timeout=25)
-                    print(f"[DEBUG] SEC Response: {response.status_code}")
+                    data = response.json()
+                    filings = data.get('filings', {}).get('filing', [])
+                    print(f"[DEBUG] Found {len(filings)} Form 4 filings")
 
-                    if response.status_code == 200:
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(response.content, 'html.parser')
+                    for filing in filings[:50]:
+                        try:
+                            company_name = filing.get('company_name', '')
+                            cik = filing.get('cik_str', '')
+                            filing_date = filing.get('filing_date', '')
 
-                        # Find main results table
-                        table = soup.find('table', {'class': 'tableFile'})
+                            # Check if this matches Congressional patterns
+                            if self._is_political_filing(company_name):
+                                print(f"[DEBUG] ✓ Found political filing: {company_name}")
 
-                        if table:
-                            rows = table.find_all('tr')
-                            print(f"[DEBUG] Found {len(rows)} rows in SEC table")
+                                # Fetch detailed filing
+                                details = self._fetch_form4_json_details(cik, filing_date)
+                                if details:
+                                    trades.append(details)
+                                    self.seen_trades.add(details.get('id', ''))
+                                    print(f"[DEBUG] ✅ ADDED: {company_name}")
 
-                            # Process each row
-                            for row in rows[1:101]:  # Skip header, check up to 100 rows
-                                try:
-                                    cols = row.find_all('td')
-                                    if len(cols) < 5:
-                                        continue
+                        except Exception as e:
+                            print(f"[DEBUG] Error parsing filing: {str(e)[:60]}")
+                            continue
 
-                                    # Extract company info
-                                    company_link = cols[0].find('a')
-                                    if not company_link:
-                                        continue
-
-                                    company_name = company_link.text.strip()
-                                    cik_link = cols[1].find('a')
-                                    cik = cik_link.text.strip() if cik_link else ''
-                                    filing_date = cols[3].text.strip() if len(cols) > 3 else ''
-
-                                    # Check if this looks like a Congressional trade
-                                    is_political = any(kw in company_name.lower() for kw in self.political_keywords)
-
-                                    if is_political and company_name and cik and filing_date:
-                                        print(f"[DEBUG] ✓ Found Congressional filing: {company_name}")
-
-                                        trade_id = f"sec_{cik}_{filing_date}_{company_name}"
-
-                                        if trade_id not in self.seen_trades:
-                                            # Fetch full filing details
-                                            filing_details = self._get_form4_details(cik, filing_date, company_name)
-
-                                            if filing_details:
-                                                trades.append(filing_details)
-                                                self.seen_trades.add(trade_id)
-                                                print(f"[DEBUG] ✅ ADDED: {company_name} - {filing_details.get('transaction_type', 'TRADE')} {filing_details.get('ticker', 'N/A')}")
-
-                                except Exception as e:
-                                    print(f"[DEBUG] Error parsing row: {str(e)[:60]}")
-                                    continue
-
-                        else:
-                            print(f"[DEBUG] No table found in SEC response")
-
-                    else:
-                        print(f"[DEBUG] SEC returned {response.status_code}")
-
-                except Exception as e:
-                    print(f"[DEBUG] Error fetching SEC for {date_str}: {str(e)[:80]}")
-
-                time.sleep(3)  # Respectful delay between requests
+                except json.JSONDecodeError:
+                    print("[DEBUG] Failed to parse SEC JSON response")
 
         except Exception as e:
-            print(f"[DEBUG] Error in _fetch_sec_form4_filings: {str(e)[:100]}")
+            print(f"[DEBUG] Error fetching SEC JSON API: {str(e)[:80]}")
 
+        # Method 2: Fallback - check known Congressional CIKs
+        if not trades:
+            print("[DEBUG] Trying known Congressional CIKs...")
+            trades.extend(self._fetch_known_congressional_ciks())
+
+        time.sleep(2)
         return trades
 
-    def _get_form4_details(self, cik: str, filing_date: str, company_name: str) -> Dict:
-        """Get details from Form 4 filing"""
-        try:
-            print(f"[DEBUG] Fetching Form 4 details for CIK: {cik}")
+    def _is_political_filing(self, company_name: str) -> bool:
+        """Check if company name indicates a Congressional member"""
+        political_keywords = [
+            'trust', 'foundation', 'pac', 'committee',
+            'trump', 'biden', 'harris', 'pence', 'pelosi', 'mccarthy',
+            'schumer', 'mcconnell', 'gaetz', 'jordan', 'omar', 'tlaib',
+            'ossoff', 'fetterman', 'kean', 'vance', 'johnson',
+            'goodlander', 'krishnamoorthi', 'pappas', 'bresnahan',
+            'young', 'hawley', 'congressional', 'senate', 'house'
+        ]
+        return any(kw in company_name.lower() for kw in political_keywords)
 
-            # Build URL to filing documents
-            url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=4&dateb={filing_date}&owner=exclude&count=1"
+    def _fetch_form4_json_details(self, cik: str, date: str) -> Dict:
+        """Fetch Form 4 details from SEC JSON API"""
+        try:
+            # Use data.sec.gov for detailed submissions
+            url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
+            print(f"[DEBUG] Fetching Form 4 details from: {url[:70]}")
 
             response = self.session.get(url, headers=self.headers, timeout=20)
 
             if response.status_code == 200:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(response.content, 'html.parser')
+                data = response.json()
+                company_name = data.get('cik_name', 'Unknown')
+                filings = data.get('filings', {}).get('recent', {}).get('form', [])
 
-                # Try to find the actual Form 4 document link
-                doc_table = soup.find('table', {'class': 'tableFile'})
-                if doc_table:
-                    doc_link = doc_table.find('a', href=re.compile(r'\.htm'))
-                    if doc_link:
-                        doc_url = f"https://www.sec.gov{doc_link.get('href', '')}"
-                        print(f"[DEBUG] Fetching Form 4 document")
+                # Find Form 4 filings
+                for i, form_type in enumerate(filings):
+                    if form_type == '4':
+                        filing_date = data.get('filings', {}).get('recent', {}).get('filingDate', [])[i]
 
-                        doc_response = self.session.get(doc_url, headers=self.headers, timeout=15)
-                        if doc_response.status_code == 200:
-                            doc_text = doc_response.text.lower()
+                        if filing_date == date:
+                            accession = data.get('filings', {}).get('recent', {}).get('accessionNumber', [])[i]
 
-                            # Extract transaction info
-                            ticker = self._extract_ticker_from_text(doc_text)
-                            action = self._determine_action_from_text(doc_text)
+                            # Extract transaction details
+                            transaction_type = self._extract_form4_transaction_type(data, i)
+                            ticker = self._extract_ticker_from_form4(data, i)
 
-                            if ticker and action:
-                                return {
-                                    'politician_name': company_name[:70],
-                                    'ticker': ticker,
-                                    'transaction_type': action,
-                                    'amount': 'See SEC Filing',
-                                    'transaction_date': filing_date,
-                                    'summary': f'Form 4: {company_name}',
-                                    'id': f"sec_{cik}_{filing_date}",
-                                    'source': 'SEC Form 4',
-                                    'link': doc_url
-                                }
+                            return {
+                                'politician_name': company_name[:70],
+                                'ticker': ticker if ticker else 'TBD',
+                                'transaction_type': transaction_type if transaction_type else 'TRADE 📊',
+                                'amount': 'See SEC Filing',
+                                'transaction_date': filing_date,
+                                'summary': f'Form 4: {company_name}',
+                                'id': f"sec_{cik}_{date}_{accession}",
+                                'source': 'SEC Form 4 (JSON API)',
+                                'link': f"https://www.sec.gov/cgi-bin/viewer?action=view&cik={cik}&accession_number={accession}&xbrl_type=v"
+                            }
 
         except Exception as e:
-            print(f"[DEBUG] Error getting Form 4 details: {str(e)[:60]}")
-
-        # Return basic filing info if details fail
-        return {
-            'politician_name': company_name[:70],
-            'ticker': 'PENDING',
-            'transaction_type': 'Form 4 Filing',
-            'amount': 'See SEC',
-            'transaction_date': filing_date,
-            'summary': f'Form 4: {company_name}',
-            'id': f"sec_{cik}_{filing_date}",
-            'source': 'SEC Form 4'
-        }
-
-    def _extract_ticker_from_text(self, text: str) -> str:
-        """Extract ticker from Form 4 text"""
-        # Look for $TICKER
-        match = re.search(r'\$([A-Z]{1,5})\b', text)
-        if match:
-            return match.group(1)
-
-        # Look for "Security: TICKER" or similar
-        match = re.search(r'security[^:]*:\s*([A-Z]{1,5})\b', text)
-        if match:
-            return match.group(1)
-
-        # Look for common symbols
-        symbols = ['aapl', 'msft', 'googl', 'amzn', 'tsla', 'nvda', 'meta', 'nflx']
-        for symbol in symbols:
-            if symbol in text:
-                return symbol.upper()
+            print(f"[DEBUG] Error fetching Form 4 JSON details: {str(e)[:60]}")
 
         return None
 
-    def _determine_action_from_text(self, text: str) -> str:
-        """Determine BUY/SELL from Form 4 text"""
-        # Look for transaction type indicators in Form 4
-        if 'open market purchase' in text or ('p' in text and 'purchase' in text):
-            return 'BUY 📈'
-        elif 'open market sale' in text or 'sale' in text and 'sell' in text:
-            return 'SELL 📉'
-        elif 'exercise of options' in text:
-            return 'EXERCISE 📊'
-        else:
-            return 'TRADE 📊'
+    def _fetch_known_congressional_ciks(self) -> List[Dict]:
+        """Fetch trades from known Congressional member CIKs"""
+        trades = []
+
+        for cik, name in self.congressional_ciks.items():
+            try:
+                print(f"[DEBUG] Checking {name} (CIK: {cik})")
+
+                url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
+                response = self.session.get(url, headers=self.headers, timeout=15)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    filings = data.get('filings', {}).get('recent', {})
+                    forms = filings.get('form', [])
+
+                    # Find recent Form 4s
+                    for i, form in enumerate(forms[:20]):
+                        if form == '4':
+                            filing_date = filings.get('filingDate', [])[i]
+                            trade_id = f"sec_{cik}_{filing_date}"
+
+                            if trade_id not in self.seen_trades:
+                                trades.append({
+                                    'politician_name': name,
+                                    'ticker': 'PENDING',
+                                    'transaction_type': 'Form 4',
+                                    'amount': 'See SEC',
+                                    'transaction_date': filing_date,
+                                    'summary': f'Form 4: {name}',
+                                    'id': trade_id,
+                                    'source': 'SEC Form 4 (API)',
+                                    'link': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=4"
+                                })
+                                self.seen_trades.add(trade_id)
+                                print(f"[DEBUG] ✅ Added {name} Form 4")
+
+                time.sleep(1)
+
+            except Exception as e:
+                print(f"[DEBUG] Error with {name}: {str(e)[:60]}")
+
+        return trades
+
+    def _extract_form4_transaction_type(self, data: Dict, index: int) -> str:
+        """Extract transaction type from Form 4 data"""
+        try:
+            transactions = data.get('filings', {}).get('recent', {}).get('transactionType', [])
+            if index < len(transactions):
+                tx_type = transactions[index].lower()
+                if 'purchase' in tx_type or 'open market buy' in tx_type:
+                    return 'BUY 📈'
+                elif 'sale' in tx_type or 'open market sell' in tx_type:
+                    return 'SELL 📉'
+        except:
+            pass
+        return None
+
+    def _extract_ticker_from_form4(self, data: Dict, index: int) -> str:
+        """Extract ticker symbol from Form 4 data"""
+        try:
+            tickers = data.get('filings', {}).get('recent', {}).get('ticker', [])
+            if index < len(tickers):
+                return tickers[index]
+        except:
+            pass
+        return None
 
     def _fetch_google_news_trades(self) -> List[Dict]:
         """Fetch Congress trades from Google News (supplementary source)"""
@@ -263,39 +262,30 @@ class PoliticianTradeTracker:
             rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
             print(f"[DEBUG] Fetching Google News: {query}")
-            response = requests.get(rss_url, headers=self.headers, timeout=15)
+            response = requests.get(rss_url, headers={'User-Agent': self.headers['User-Agent']}, timeout=15)
 
             if response.status_code == 200:
                 root = ET.fromstring(response.content)
                 items = root.findall('.//item')
                 print(f"[DEBUG] Found {len(items)} Google News items")
 
-                for item in items[:20]:  # Process up to 20 items
+                for item in items[:15]:
                     try:
                         title_elem = item.find('title')
                         link_elem = item.find('link')
-                        description_elem = item.find('description')
 
                         if title_elem is None or not title_elem.text:
                             continue
 
                         title = title_elem.text
                         link = link_elem.text if link_elem is not None else ''
-                        description = description_elem.text if description_elem is not None else ''
-
-                        # Create unique ID
                         trade_id = f"gnews_{title}_{datetime.now().date()}"
 
                         if trade_id not in self.seen_trades:
-                            # Try to extract ticker and action from title/description
-                            combined_text = f"{title} {description}".lower()
-                            ticker = self._extract_ticker_from_text(combined_text)
-                            action = self._determine_action_from_text(combined_text)
-
                             trades.append({
                                 'politician_name': 'Congress Member',
-                                'ticker': ticker if ticker else 'TBD',
-                                'transaction_type': action if action else 'TRADE 📊',
+                                'ticker': 'TBD',
+                                'transaction_type': 'TRADE 📊',
                                 'amount': 'See Article',
                                 'transaction_date': datetime.now().strftime('%Y-%m-%d'),
                                 'summary': title[:80],
@@ -307,7 +297,6 @@ class PoliticianTradeTracker:
                             print(f"[DEBUG] Added Google News: {title[:60]}")
 
                     except Exception as e:
-                        print(f"[DEBUG] Error processing Google News item: {str(e)[:60]}")
                         continue
 
         except Exception as e:
@@ -316,17 +305,17 @@ class PoliticianTradeTracker:
         return trades
 
     def format_trade_alert(self, trade: Dict) -> str:
-        """Format alert"""
+        """Format trade alert"""
         politician = trade.get('politician_name', 'Unknown')
-        ticker = trade.get('ticker', 'PENDING')
-        action = trade.get('transaction_type', 'Filing')
+        ticker = trade.get('ticker', 'TBD')
+        action = trade.get('transaction_type', 'Trade')
         date = trade.get('transaction_date', 'Unknown')
         source = trade.get('source', 'Unknown')
-        link = trade.get('link', '')
         summary = trade.get('summary', '')
+        link = trade.get('link', '')
 
         alert = f"📊 CONGRESSIONAL TRADE\n{politician}\n{action} {ticker}\nDate: {date}\nSource: {source}"
-        if summary:
+        if summary and 'Form 4' not in summary:
             alert += f"\n{summary[:60]}"
         if link:
             alert += f"\nView: {link[:70]}"

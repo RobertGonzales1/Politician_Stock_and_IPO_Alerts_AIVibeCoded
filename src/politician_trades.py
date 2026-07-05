@@ -4,6 +4,7 @@ import re
 import time
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional
+from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -11,10 +12,16 @@ from urllib3.util.retry import Retry
 # This mirrors the official filings at disclosures-clerk.house.gov. Members of
 # Congress do NOT file SEC Form 4s, so House Clerk PTR data is the authoritative
 # source for politician trades. Verified live 2026-07-05 (updated through 2026-07-04).
-# NOTE: no maintained free Senate equivalent exists (senate-stock-watcher died in
-# 2020 and its records lack disclosure_date entirely), so Senate trades are only
-# covered via the news feed below.
 HOUSE_TRANSACTIONS_URL = "https://raw.githubusercontent.com/TattooedHead/house-stock-watcher-data/main/data/all_transactions.json"
+
+# Senate trades come straight from the official eFD system (efdsearch.senate.gov):
+# accept the usage agreement to get a session, query the PTR search API, then
+# parse each electronic filing's transaction table. Flow and response structure
+# verified live 2026-07-05. Paper (scanned) filings can't be parsed and are skipped.
+SENATE_EFD_LANDING = "https://efdsearch.senate.gov/search/home/"
+SENATE_EFD_SEARCH = "https://efdsearch.senate.gov/search/"
+SENATE_EFD_REPORTS_API = "https://efdsearch.senate.gov/search/report/data/"
+SENATE_MAX_REPORTS_PER_RUN = 20
 
 # Alert on trades disclosed within this many days (STOCK Act allows up to 45 days
 # between trade and disclosure, so the disclosure date is what makes a trade "news").
@@ -71,6 +78,11 @@ class PoliticianTradeTracker:
         print(f"[DEBUG] House: {len(house)} trades disclosed in last {DISCLOSURE_WINDOW_DAYS} days")
         candidates.extend(house)
 
+        print("[DEBUG] Fetching Senate PTR disclosures (official eFD system)...")
+        senate = self._fetch_senate_trades()
+        print(f"[DEBUG] Senate: {len(senate)} trades disclosed in last {DISCLOSURE_WINDOW_DAYS} days")
+        candidates.extend(senate)
+
         print("[DEBUG] Fetching Google News (supplementary, ticker-bearing articles only)...")
         news = self._fetch_google_news_trades()
         print(f"[DEBUG] Google News: {len(news)} trades with tickers")
@@ -102,6 +114,18 @@ class PoliticianTradeTracker:
         # cap goes out in a later run instead of being dropped silently.
         for t in new_trades:
             self.seen_trades.add(t['id'])
+
+        # A Senate filing is only marked fully processed once every one of its
+        # trades has been sent, so over-cap leftovers still go out next run.
+        filing_trade_ids = {}
+        for t in candidates:
+            marker = t.get('filing_marker')
+            if marker:
+                filing_trade_ids.setdefault(marker, []).append(t['id'])
+        for marker, ids in filing_trade_ids.items():
+            if all(i in self.seen_trades for i in ids):
+                self.seen_trades.add(marker)
+
         self._save_seen_trades()
 
         print(f"[DEBUG] {len(new_trades)} new trades after dedup (cap {MAX_ALERTS})")
@@ -158,6 +182,7 @@ class PoliticianTradeTracker:
                         'ticker': ticker,
                         'transaction_type': action,
                         'amount': amount,
+                        'owner': owner,
                         'transaction_date': traded,
                         'disclosure_date': rec.get('disclosure_date', ''),
                         'source': source_label,
@@ -183,6 +208,155 @@ class PoliticianTradeTracker:
             print(f"[DEBUG] Error fetching {source_label}: {str(e)[:80]}")
         except ValueError as e:
             print(f"[DEBUG] Error parsing {source_label} JSON: {str(e)[:80]}")
+
+        return trades
+
+    def _fetch_senate_trades(self) -> List[Dict]:
+        """Scrape Senate PTRs from the official eFD system.
+
+        Verified flow: GET the landing page for a CSRF form token, POST the
+        usage-agreement to obtain a session, then POST the search API for
+        Periodic Transaction Reports (report type 11) submitted in our window.
+        Each electronic filing page holds a 9-column transaction table:
+        [#, tx date, owner, ticker, asset name, asset type, type, amount, comment].
+        """
+        trades = []
+        try:
+            # Step 1: accept the usage agreement to get a session
+            landing = self.session.get(SENATE_EFD_LANDING, headers=self.headers, timeout=30)
+            soup = BeautifulSoup(landing.text, 'html.parser')
+            csrf_input = soup.find(attrs={'name': 'csrfmiddlewaretoken'})
+            form_token = csrf_input.get('value') if csrf_input else None
+            if not form_token:
+                print("[WARN] Senate eFD: agreement page has no usable CSRF token — "
+                      "site changed or blocked this runner, source needs attention!")
+                return trades
+            self.session.post(
+                SENATE_EFD_LANDING,
+                data={'csrfmiddlewaretoken': form_token, 'prohibition_agreement': '1'},
+                headers={**self.headers, 'Referer': SENATE_EFD_LANDING},
+                timeout=30,
+            )
+            csrftoken = self.session.cookies.get('csrftoken') or self.session.cookies.get('csrf')
+            if not csrftoken:
+                print("[WARN] Senate eFD: no CSRF cookie after agreement — likely "
+                      "blocked, source needs attention!")
+                return trades
+
+            # Step 2: search for PTRs submitted within the window
+            start_date = (datetime.now() - timedelta(days=DISCLOSURE_WINDOW_DAYS)).strftime('%m/%d/%Y 00:00:00')
+            payload = {
+                'start': '0',
+                'length': '100',
+                'report_types': '[11]',
+                'filer_types': '[]',
+                'submitted_start_date': start_date,
+                'submitted_end_date': '',
+                'candidate_state': '',
+                'senator_state': '',
+                'office_id': '',
+                'first_name': '',
+                'last_name': '',
+                'csrfmiddlewaretoken': csrftoken,
+            }
+            resp = self.session.post(
+                SENATE_EFD_REPORTS_API,
+                data=payload,
+                headers={**self.headers, 'Referer': SENATE_EFD_SEARCH},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                print(f"[WARN] Senate eFD: search API returned HTTP {resp.status_code}, "
+                      f"source needs attention!")
+                return trades
+            body = resp.json()
+            rows = body.get('data') if isinstance(body, dict) else None
+            if not isinstance(rows, list):
+                print("[WARN] Senate eFD: search API returned an unexpected JSON "
+                      "shape — source needs attention!")
+                return trades
+            print(f"[DEBUG] Senate eFD: {len(rows)} PTR filings in window")
+
+            # Step 3: parse each electronic filing's transaction table
+            fetched = 0
+            parsed_ok = 0
+            for row in rows:
+                try:
+                    # Verified row shape: [first, last, "Name (Senator)", link_html, date_received]
+                    if len(row) < 5:
+                        continue
+                    first, last, _display, link_html, date_received = row[:5]
+                    a = BeautifulSoup(link_html, 'html.parser').find('a')
+                    href = a.get('href', '') if a else ''
+                    name = f"Sen. {first.strip()} {last.strip(' ,')}"
+
+                    if '/search/view/ptr/' not in href:
+                        print(f"[DEBUG] Senate eFD: skipping paper filing by {name}")
+                        continue
+                    # Skip filings whose every trade already went out — don't
+                    # spend the per-run fetch cap re-downloading them.
+                    filing_marker = f"senate_filing_{href}"
+                    if filing_marker in self.seen_trades:
+                        continue
+                    if fetched >= SENATE_MAX_REPORTS_PER_RUN:
+                        print("[DEBUG] Senate eFD: report cap reached, rest next run")
+                        break
+                    fetched += 1
+
+                    time.sleep(1)  # be polite to the Senate's servers
+                    page = self.session.get('https://efdsearch.senate.gov' + href,
+                                            headers=self.headers, timeout=30)
+                    if page.status_code != 200:
+                        print(f"[DEBUG] Senate eFD: filing page HTTP {page.status_code} for {name}")
+                        continue
+                    tbody = BeautifulSoup(page.text, 'html.parser').find('tbody')
+                    if tbody is None:
+                        print(f"[DEBUG] Senate eFD: no transaction table for {name}")
+                        continue
+                    parsed_ok += 1
+
+                    filing_trade_count = 0
+                    for tr in tbody.find_all('tr'):
+                        cols = [td.get_text(strip=True) for td in tr.find_all('td')]
+                        if len(cols) < 8:
+                            continue
+                        tx_num, tx_date, owner, ticker, _asset, _atype, tx_type, amount = cols[:8]
+                        if not ticker or ticker.upper() in ('--', 'N/A', 'NA', '-', 'NONE'):
+                            continue
+                        filing_trade_count += 1
+                        trades.append({
+                            'id': f"senate_{href}_{tx_num}",
+                            'politician_name': name,
+                            'ticker': ticker,
+                            'transaction_type': self._map_transaction_type(tx_type),
+                            'amount': amount,
+                            'owner': owner,
+                            'transaction_date': tx_date,
+                            'disclosure_date': date_received,
+                            'source': 'Senate PTR',
+                            'link': '',
+                            'filing_marker': filing_marker,
+                        })
+
+                    if filing_trade_count == 0:
+                        # Nothing alertable in this filing (bonds, options with no
+                        # ticker, etc.) — mark it done so it isn't re-fetched daily.
+                        self.seen_trades.add(filing_marker)
+                except Exception as e:
+                    print(f"[DEBUG] Senate eFD: skipping malformed filing: {str(e)[:60]}")
+                    continue
+
+            if fetched and not parsed_ok:
+                print("[WARN] Senate eFD: filings fetched but none parsed — page "
+                      "template may have changed, source needs attention!")
+
+        except requests.RequestException as e:
+            print(f"[WARN] Senate eFD: request failed — {str(e)[:80]}")
+        except ValueError as e:
+            print(f"[WARN] Senate eFD: bad JSON from search API — {str(e)[:80]}")
+        except Exception as e:
+            # Backstop: a Senate failure must never take down the other sources.
+            print(f"[WARN] Senate eFD: unexpected error — {str(e)[:80]}")
 
         return trades
 
@@ -308,12 +482,21 @@ class PoliticianTradeTracker:
         disclosed = trade.get('disclosure_date', '')
         source = trade.get('source', '')
 
-        lines = [name, f"{action} {ticker}" + (f"  ({amount})" if amount else "")]
-        date_line = f"Traded: {traded}" if traded else ""
+        # Show the account owner (Spouse, Joint, Child) when it isn't the member
+        # themselves — filings often list several same-day lots split by account.
+        owner = (trade.get('owner') or '').strip()
+        detail = amount
+        if owner and owner.lower() not in ('self', '--', 'n/a'):
+            detail = f"{amount}, {owner}" if amount else owner
+
+        lines = [name, f"{action} {ticker}" + (f"  ({detail})" if detail else "")]
+        date_parts = []
+        if traded:
+            date_parts.append(f"Traded: {traded}")
         if disclosed:
-            date_line += f" | Disclosed: {disclosed}"
-        if date_line:
-            lines.append(date_line)
+            date_parts.append(f"Disclosed: {disclosed}")
+        if date_parts:
+            lines.append(" | ".join(date_parts))
         if trade.get('summary'):
             lines.append(trade['summary'])
         if source:

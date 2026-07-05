@@ -234,10 +234,23 @@ class PoliticianTradeTracker:
                         if form4_count > 0:
                             print(f"[DEBUG] {name} has {form4_count} Form 4 filings")
 
-                            for i, form in enumerate(forms[:50]):
+                            # Only check RECENT Form 4s (last 30 days) to avoid old duplicates
+                            today = datetime.now().date()
+                            thirty_days_ago = today - timedelta(days=30)
+
+                            for i, form in enumerate(forms[:100]):
                                 if form == '4':
-                                    filing_date = filings.get('filingDate', [])[i]
-                                    trade_id = f"sec_{cik}_{filing_date}"
+                                    filing_date_str = filings.get('filingDate', [])[i]
+                                    try:
+                                        filing_date_obj = datetime.strptime(filing_date_str, '%Y-%m-%d').date()
+                                    except:
+                                        continue
+
+                                    # Only include recent filings
+                                    if filing_date_obj < thirty_days_ago:
+                                        continue
+
+                                    trade_id = f"sec_{cik}_{filing_date_str}"
 
                                     if trade_id not in self.seen_trades:
                                         trades.append({
@@ -353,20 +366,38 @@ class PoliticianTradeTracker:
 
     def _extract_ticker_from_google_news(self, text: str) -> str:
         """Extract ticker from Google News text"""
-        # Look for $TICKER or (TICKER) patterns
-        match = re.search(r'\(\s*([A-Z]{1,5})\s*\)|\$([A-Z]{1,5})\b', text)
+        # Look for $TICKER or (TICKER) patterns - MOST SPECIFIC
+        match = re.search(r'\$([A-Z]{1,5})\b', text)
         if match:
-            return match.group(1) or match.group(2)
+            ticker = match.group(1)
+            return ticker if len(ticker) <= 5 else None
 
-        # Look for common stock symbols
-        symbols = {
-            'apple': 'AAPL', 'microsoft': 'MSFT', 'google': 'GOOGL', 'amazon': 'AMZN',
-            'tesla': 'TSLA', 'nvidia': 'NVDA', 'meta': 'META', 'nvidia': 'NVDA',
-            'spacex': 'SPCX', 'palantir': 'PLTR', 'aerovironment': 'AVAV'
+        # Look for company names that are SPECIFICALLY about stock symbols
+        # Only match if preceded by "stock" or "ticker" or in parentheses
+        match = re.search(r'(?:stock|ticker|symbol|company).*\(([A-Z]{1,5})\)', text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+        # Look for specific company/ticker pairs (ONLY exact company mentions in headlines)
+        ticker_map = {
+            r'\bspacex\b': 'SPCX',
+            r'\baerovironment\b': 'AVAV',
+            r'\bpalantir\b': 'PLTR',
+            r'\bmicron\b': 'MU',
+            r'\bchevron\b': 'CVX',
+            r'\bcaterpillar\b': 'CAT',
+            r'\bmeta\b': 'META',
+            r'\bamazon\b': 'AMZN',
+            r'\bapple\b': 'AAPL',
+            r'\bmsft\b': 'MSFT',
+            r'\btsla\b': 'TSLA',
+            r'\bnvda\b': 'NVDA',
         }
-        for word, ticker in symbols.items():
-            if word in text:
+
+        for pattern, ticker in ticker_map.items():
+            if re.search(pattern, text, re.IGNORECASE):
                 return ticker
+
         return None
 
     def _determine_action_google_news(self, text: str) -> str:
@@ -380,25 +411,34 @@ class PoliticianTradeTracker:
 
     def _extract_politician_from_news(self, title: str) -> str:
         """Extract politician name from news headline"""
-        # Look for patterns like "Rep. John Smith" or "Sen. Jane Doe"
+        # List of known politicians to look for
+        politicians = [
+            'pelosi', 'trump', 'biden', 'harris', 'ossoff', 'hawley', 'johnson',
+            'kean', 'gaetz', 'jordan', 'schumer', 'mcconnell', 'mccarthy', 'fetterman',
+            'vance', 'omar', 'tlaib', 'greene', 'ocasio-cortez', 'aoc', 'pappas',
+            'goodlander', 'krishnamoorthi', 'cloud', 'garcia', 'young'
+        ]
+
+        title_lower = title.lower()
+
+        # Look for specific politician names
+        for politician in politicians:
+            if politician in title_lower:
+                # Return title-cased version
+                return politician.replace('-', ' ').title()
+
+        # Look for "Rep." or "Sen." patterns
         patterns = [
-            r'(?:Rep|Representative)\.\s+(\w+\s+\w+)',
-            r'(?:Sen|Senator)\.\s+(\w+\s+\w+)',
-            r'(\w+\s+\w+)\s+(?:says|defends|files|makes|buys|sells)',
+            r'(?:Rep|Representative)\s+(\w+\s+\w+)',
+            r'(?:Sen|Senator)\s+(\w+\s+\w+)',
         ]
 
         for pattern in patterns:
             match = re.search(pattern, title, re.IGNORECASE)
             if match:
                 name = match.group(1).strip()
-                if len(name) > 3:
+                if len(name) > 4 and name[0].isupper():
                     return name
-
-        # Extract first capitalized pair if no pattern matches
-        words = title.split()
-        for i, word in enumerate(words):
-            if word[0].isupper() and i + 1 < len(words) and words[i+1][0].isupper():
-                return f"{word} {words[i+1]}"
 
         return "Congress Member"
 

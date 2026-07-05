@@ -372,10 +372,13 @@ class PoliticianTradeTracker:
         return None
 
     def _map_transaction_type(self, tx_type: str) -> str:
+        # Word-boundary matching so e.g. "Sales Data" in a headline doesn't
+        # read as a sell signal. PTR values ('Purchase', 'Sale (Full)',
+        # 'Sale (Partial)', 'Exchange') all still match.
         t = (tx_type or '').lower()
-        if 'purchase' in t or 'buy' in t or 'bought' in t:
+        if re.search(r'\b(purchased?|buy|buys|buying|bought)\b', t):
             return 'BUY 📈'
-        if 'sale' in t or 'sell' in t or 'sold' in t:
+        if re.search(r'\b(sale|sold|sell|sells|selling)\b', t):
             return 'SELL 📉'
         if 'exchange' in t:
             return 'EXCHANGE 🔄'

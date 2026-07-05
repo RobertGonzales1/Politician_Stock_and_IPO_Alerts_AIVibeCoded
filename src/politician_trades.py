@@ -19,7 +19,7 @@ HOUSE_TRANSACTIONS_URL = "https://raw.githubusercontent.com/TattooedHead/house-s
 # Alert on trades disclosed within this many days (STOCK Act allows up to 45 days
 # between trade and disclosure, so the disclosure date is what makes a trade "news").
 DISCLOSURE_WINDOW_DAYS = 14
-MAX_ALERTS = 25
+MAX_ALERTS = 50
 
 
 class PoliticianTradeTracker:
@@ -76,18 +76,30 @@ class PoliticianTradeTracker:
         print(f"[DEBUG] Google News: {len(news)} trades with tickers")
         candidates.extend(news)
 
-        # Drop already-alerted trades (and same-run duplicates), cap the email
-        # size, and only mark the trades we actually send as seen — so anything
-        # over the cap is sent in a later run instead of dropped silently.
-        new_trades = []
+        # Drop already-alerted trades (and same-run duplicates).
+        fresh = []
         run_ids = set()
         for t in candidates:
             if t['id'] in self.seen_trades or t['id'] in run_ids:
                 continue
             run_ids.add(t['id'])
-            new_trades.append(t)
-            if len(new_trades) >= MAX_ALERTS:
-                break
+            fresh.append(t)
+
+        # Interleave across politicians so one filer disclosing dozens of
+        # trades at once doesn't crowd everyone else out of a capped email.
+        by_politician = {}
+        for t in fresh:
+            by_politician.setdefault(t['politician_name'], []).append(t)
+        new_trades = []
+        while len(new_trades) < MAX_ALERTS and any(by_politician.values()):
+            for items in by_politician.values():
+                if items:
+                    new_trades.append(items.pop(0))
+                    if len(new_trades) >= MAX_ALERTS:
+                        break
+
+        # Only mark the trades we actually send as seen — anything over the
+        # cap goes out in a later run instead of being dropped silently.
         for t in new_trades:
             self.seen_trades.add(t['id'])
         self._save_seen_trades()

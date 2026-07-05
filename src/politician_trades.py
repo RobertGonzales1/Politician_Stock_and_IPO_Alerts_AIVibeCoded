@@ -319,8 +319,8 @@ class PoliticianTradeTracker:
                         combined_text = f"{title} {description}".lower()
 
                         # Extract info from title/description
-                        ticker = self._extract_ticker_from_text(combined_text)
-                        action = self._determine_action_from_text(combined_text)
+                        ticker = self._extract_ticker_from_google_news(combined_text)
+                        action = self._determine_action_google_news(combined_text)
                         politician = self._extract_politician_from_news(title)
 
                         trade_id = f"gnews_{title[:50]}_{datetime.now().date()}"
@@ -350,6 +350,33 @@ class PoliticianTradeTracker:
             print(f"[DEBUG] Error fetching Google News: {str(e)[:80]}")
 
         return trades
+
+    def _extract_ticker_from_google_news(self, text: str) -> str:
+        """Extract ticker from Google News text"""
+        # Look for $TICKER or (TICKER) patterns
+        match = re.search(r'\(\s*([A-Z]{1,5})\s*\)|\$([A-Z]{1,5})\b', text)
+        if match:
+            return match.group(1) or match.group(2)
+
+        # Look for common stock symbols
+        symbols = {
+            'apple': 'AAPL', 'microsoft': 'MSFT', 'google': 'GOOGL', 'amazon': 'AMZN',
+            'tesla': 'TSLA', 'nvidia': 'NVDA', 'meta': 'META', 'nvidia': 'NVDA',
+            'spacex': 'SPCX', 'palantir': 'PLTR', 'aerovironment': 'AVAV'
+        }
+        for word, ticker in symbols.items():
+            if word in text:
+                return ticker
+        return None
+
+    def _determine_action_google_news(self, text: str) -> str:
+        """Determine action from Google News text"""
+        if any(kw in text for kw in ['buy', 'purchase', 'bought', 'purchasing']):
+            return 'BUY 📈'
+        elif any(kw in text for kw in ['sell', 'sold', 'selling', 'divest']):
+            return 'SELL 📉'
+        else:
+            return 'TRADE 📊'
 
     def _extract_politician_from_news(self, title: str) -> str:
         """Extract politician name from news headline"""

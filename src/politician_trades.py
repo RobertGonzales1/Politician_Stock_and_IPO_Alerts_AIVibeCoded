@@ -57,13 +57,22 @@ class PoliticianTradeTracker:
             json.dump(list(self.seen_trades), f)
 
     def get_recent_trades(self) -> List[Dict]:
-        """Fetch Congress trades directly from SEC Form 4 filings"""
+        """Fetch Congress trades from both SEC (primary) and Google News (supplementary)"""
         trades = []
 
-        print("[DEBUG] Fetching Congress trades from SEC Form 4 filings (primary source)...")
+        print("[DEBUG] === FETCHING CONGRESS TRADES ===")
+
+        # Primary source: SEC Form 4 filings
+        print("[DEBUG] Fetching from SEC Form 4 filings (primary)...")
         sec_trades = self._fetch_sec_form4_filings()
-        print(f"[DEBUG] Found {len(sec_trades)} Congressional trades from SEC")
+        print(f"[DEBUG] Found {len(sec_trades)} trades from SEC")
         trades.extend(sec_trades)
+
+        # Supplementary source: Google News
+        print("[DEBUG] Fetching from Google News (supplementary)...")
+        google_trades = self._fetch_google_news_trades()
+        print(f"[DEBUG] Found {len(google_trades)} trades from Google News")
+        trades.extend(google_trades)
 
         self._save_seen_trades()
         return trades[:20]
@@ -243,15 +252,82 @@ class PoliticianTradeTracker:
         else:
             return 'TRADE 📊'
 
+    def _fetch_google_news_trades(self) -> List[Dict]:
+        """Fetch Congress trades from Google News (supplementary source)"""
+        trades = []
+
+        try:
+            from xml.etree import ElementTree as ET
+
+            query = 'Congress stock trading'
+            rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+            print(f"[DEBUG] Fetching Google News: {query}")
+            response = requests.get(rss_url, headers=self.headers, timeout=15)
+
+            if response.status_code == 200:
+                root = ET.fromstring(response.content)
+                items = root.findall('.//item')
+                print(f"[DEBUG] Found {len(items)} Google News items")
+
+                for item in items[:20]:  # Process up to 20 items
+                    try:
+                        title_elem = item.find('title')
+                        link_elem = item.find('link')
+                        description_elem = item.find('description')
+
+                        if title_elem is None or not title_elem.text:
+                            continue
+
+                        title = title_elem.text
+                        link = link_elem.text if link_elem is not None else ''
+                        description = description_elem.text if description_elem is not None else ''
+
+                        # Create unique ID
+                        trade_id = f"gnews_{title}_{datetime.now().date()}"
+
+                        if trade_id not in self.seen_trades:
+                            # Try to extract ticker and action from title/description
+                            combined_text = f"{title} {description}".lower()
+                            ticker = self._extract_ticker_from_text(combined_text)
+                            action = self._determine_action_from_text(combined_text)
+
+                            trades.append({
+                                'politician_name': 'Congress Member',
+                                'ticker': ticker if ticker else 'TBD',
+                                'transaction_type': action if action else 'TRADE 📊',
+                                'amount': 'See Article',
+                                'transaction_date': datetime.now().strftime('%Y-%m-%d'),
+                                'summary': title[:80],
+                                'id': trade_id,
+                                'source': 'Google News',
+                                'link': link
+                            })
+                            self.seen_trades.add(trade_id)
+                            print(f"[DEBUG] Added Google News: {title[:60]}")
+
+                    except Exception as e:
+                        print(f"[DEBUG] Error processing Google News item: {str(e)[:60]}")
+                        continue
+
+        except Exception as e:
+            print(f"[DEBUG] Error fetching Google News: {str(e)[:80]}")
+
+        return trades
+
     def format_trade_alert(self, trade: Dict) -> str:
         """Format alert"""
         politician = trade.get('politician_name', 'Unknown')
         ticker = trade.get('ticker', 'PENDING')
         action = trade.get('transaction_type', 'Filing')
         date = trade.get('transaction_date', 'Unknown')
+        source = trade.get('source', 'Unknown')
         link = trade.get('link', '')
+        summary = trade.get('summary', '')
 
-        alert = f"📊 CONGRESSIONAL TRADE (SEC Form 4)\n{politician}\n{action} {ticker}\nDate: {date}"
+        alert = f"📊 CONGRESSIONAL TRADE\n{politician}\n{action} {ticker}\nDate: {date}\nSource: {source}"
+        if summary:
+            alert += f"\n{summary[:60]}"
         if link:
             alert += f"\nView: {link[:70]}"
         alert += "\n---"

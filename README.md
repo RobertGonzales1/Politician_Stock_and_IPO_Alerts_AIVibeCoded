@@ -19,12 +19,13 @@ Members of Congress do **not** file SEC Form 4s — those are for corporate
 insiders. Congressional trades are disclosed under the STOCK Act to the House
 and Senate Clerks:
 
-- **House trades (primary)**: [house-stock-watcher-data](https://github.com/TattooedHead/house-stock-watcher-data)
+- **House trades**: [house-stock-watcher-data](https://github.com/TattooedHead/house-stock-watcher-data)
   — a maintained JSON mirror of the official filings at
   [disclosures-clerk.house.gov](https://disclosures-clerk.house.gov/FinancialDisclosure)
-- **Senate trades**: no maintained free JSON mirror currently exists (the
-  senate-stock-watcher project stopped updating in 2020), so Senate coverage
-  comes via the news feed
+- **Senate trades**: scraped directly from the official
+  [eFD system](https://efdsearch.senate.gov/search/) (accepts the usage
+  agreement, queries the PTR search API, parses each electronic filing's
+  transaction table; paper/scanned filings can't be parsed and are skipped)
 - **News supplement**: Google News RSS (only articles naming a ticker)
 - **IPOs**: SEC EDGAR filings
 

@@ -334,20 +334,15 @@ class PoliticianTradeTracker:
         return trades
 
     def format_trade_alert(self, trade: Dict) -> str:
-        """Format trade alert"""
+        """Format trade alert - simple format"""
         politician = trade.get('politician_name', 'Unknown')
         ticker = trade.get('ticker', 'TBD')
         action = trade.get('transaction_type', 'Trade')
         date = trade.get('transaction_date', 'Unknown')
         source = trade.get('source', 'Unknown')
-        summary = trade.get('summary', '')
-        link = trade.get('link', '')
 
-        alert = f"📊 CONGRESSIONAL TRADE\n{politician}\n{action} {ticker}\nDate: {date}\nSource: {source}"
-        if summary and 'Form 4' not in summary:
-            alert += f"\n{summary[:60]}"
-        if link:
-            alert += f"\nView: {link[:70]}"
+        # Simple, clean format
+        alert = f"{politician}\n{action} {ticker}\n{date}"
         alert += "\n---"
 
         return alert

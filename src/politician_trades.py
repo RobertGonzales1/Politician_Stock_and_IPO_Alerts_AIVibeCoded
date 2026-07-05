@@ -234,9 +234,9 @@ class PoliticianTradeTracker:
                         if form4_count > 0:
                             print(f"[DEBUG] {name} has {form4_count} Form 4 filings")
 
-                            # Only check RECENT Form 4s (last 30 days) to avoid old duplicates
+                            # Check recent Form 4s to avoid old duplicates (use 2 years for testing/data availability)
                             today = datetime.now().date()
-                            thirty_days_ago = today - timedelta(days=30)
+                            date_cutoff = today - timedelta(days=730)  # 2 years for better data coverage
 
                             for i, form in enumerate(forms[:100]):
                                 if form == '4':
@@ -246,8 +246,8 @@ class PoliticianTradeTracker:
                                     except:
                                         continue
 
-                                    # Only include recent filings
-                                    if filing_date_obj < thirty_days_ago:
+                                    # Only include filings from cutoff date onwards
+                                    if filing_date_obj < date_cutoff:
                                         continue
 
                                     trade_id = f"sec_{cik}_{filing_date_str}"
@@ -339,8 +339,9 @@ class PoliticianTradeTracker:
                         trade_id = f"gnews_{title[:50]}_{datetime.now().date()}"
 
                         if trade_id not in self.seen_trades:
-                            # Accept trades with at least a ticker OR if it mentions Congress trading
-                            if ticker or 'congress' in combined_text or 'stock trade' in combined_text or 'senator' in combined_text or 'representative' in combined_text:
+                            # Accept any Congress/stock trading news (ticker optional)
+                            is_congress_news = any(kw in combined_text for kw in ['congress', 'senate', 'representative', 'senator', 'stock trade', 'stock trading', 'stock purchase', 'stock sell'])
+                            if is_congress_news:
                                 trades.append({
                                     'politician_name': politician,
                                     'ticker': ticker if ticker else 'N/A',

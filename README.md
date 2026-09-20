@@ -70,3 +70,7 @@ write permissions** so the workflow can persist its dedup tracking data.
 - `src/main.py` — orchestrator
 - `src/data/` — dedup state (auto-committed by the workflow)
 - `.github/workflows/daily_check.yml` — daily schedule
+
+## License
+
+GPL-3.0 — see [LICENSE](LICENSE). Copyright (c) 2026 RobertGonzales1.

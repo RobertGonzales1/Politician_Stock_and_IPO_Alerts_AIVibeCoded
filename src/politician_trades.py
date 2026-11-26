@@ -35,7 +35,8 @@ class PoliticianTradeTracker:
         self.seen_trades = self._load_seen_trades()
         self.session = self._create_session()
         self.headers = {
-            'User-Agent': 'PoliticianStockAlerts/1.0 (rvg2151@gmail.com)',
+            # Public repo URL as the contact; no personal email in a public repo.
+            'User-Agent': 'PoliticianStockAlerts/1.0 (+https://github.com/RobertGonzales1/Politician_Stock_and_IPO_Alerts_AIVibeCoded)',
         }
 
     def _create_session(self):
